@@ -5,13 +5,20 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-import ollama
 import psutil
+
+from core.config import ConfigurationError, load_config
+from core.llm_client import (
+    ChatMessage,
+    LLMClient,
+    LLMError,
+    OllamaClient,
+    ToolDefinition,
+)
 
 MODEL = "gemma4:e2b"
 MAX_STEPS = 8
@@ -51,16 +58,79 @@ WEATHER_CODES = {
     99: "Kuchli do'lli momaqaldiroq",
 }
 SYSTEM_PROMPT = """Siz terminalda ishlaydigan shaxsiy AI agentsiz. Foydalanuvchi bilan faqat o'zbek tilida (lotin yozuvida) gaplashing.
-Har javobingiz faqat bitta JSON obyekt bo'lsin: vosita uchun {"tool":"nomi","args":{...}}, yakuniy javob uchun {"final":"javob"}.
-JSON dan tashqari izoh, markdown yoki kod to'sig'i yozmang. Vazifani bajarish uchun mavjud vositalardan foydalaning; natijalarni o'qing va zarur bo'lsa keyingi vositani tanlang.
+Kerak bo'lsa, faqat quyida berilgan vositalardan foydalaning; model interfeysi vositalarni native tool call yoki tekshiriladigan {"tool":"nomi","args":{...}} JSON shaklida qabul qiladi. Oddiy yakuniy javobni tabiiy o'zbek tilida bering.
+Natijaga asoslanib ishlang; kerakli ma'lumot yetishmasa vositani qayta chaqiring yoki aniq cheklovni ayting.
 Vositalar:
-- find_files: {"query":"nom bo'lagi","ext":".py","folder":"."}; nom bo'lagi yoki kengaytma bilan qidiradi, istalgan parametr bo'sh bo'lishi mumkin.
-- read_text: {"path":"fayl yo'li"}; faqat .txt va .md.
-- save_note: {"title":"sarlavha","content":"matn"}; agent saqlashdan oldin foydalanuvchidan tasdiq so'raydi.
-- calculate: {"expression":"250000 * (1 - 15/100)"}; faqat arifmetik ifodalar. Foizlarni ifodaga o'zingiz aylantiring, masalan 250000 so'mdan 15 foiz chegirma: 250000 * (1 - 15/100).
-- system_status: {}.
-- get_weather: {"city":"Toshkent"}.
-Natijaga asoslanib ishlang; kerakli ma'lumot yetishmasa vositani qayta chaqiring yoki aniq cheklovni ayting."""
+- find_files: fayllarni nom bo'lagi yoki kengaytma bo'yicha izlash; query, ext, folder argumentlari ixtiyoriy.
+- read_text: .txt yoki .md faylini o'qish; path talab qilinadi.
+- save_note: eslatmani saqlash; title va content talab qilinadi, saqlashdan oldin tasdiq so'raladi.
+- calculate: arifmetik ifodani hisoblash; expression talab qilinadi.
+- system_status: CPU, RAM va disk holati.
+- get_weather: shahar ob-havosi; city talab qilinadi."""
+
+TOOL_DEFINITIONS = (
+    ToolDefinition(
+        name="find_files",
+        description="Nom bo'lagi yoki kengaytma bilan fayllarni qidirish.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "ext": {"type": "string"},
+                "folder": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    ToolDefinition(
+        name="read_text",
+        description="UTF-8 .txt yoki .md faylning boshidan 6000 belgigacha o'qish.",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string", "minLength": 1}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolDefinition(
+        name="save_note",
+        description="Foydalanuvchi tasdig'idan keyin agent_notes ichiga eslatma yozish.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1},
+                "content": {"type": "string"},
+            },
+            "required": ["title", "content"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolDefinition(
+        name="calculate",
+        description="Xavfsiz ruxsat etilgan arifmetik ifodani hisoblash.",
+        parameters={
+            "type": "object",
+            "properties": {"expression": {"type": "string", "minLength": 1}},
+            "required": ["expression"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolDefinition(
+        name="system_status",
+        description="CPU, RAM va root disk holatini qaytarish.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    ),
+    ToolDefinition(
+        name="get_weather",
+        description="Open-Meteo orqali shaharning joriy ob-havosini olish.",
+        parameters={
+            "type": "object",
+            "properties": {"city": {"type": "string", "minLength": 1}},
+            "required": ["city"],
+            "additionalProperties": False,
+        },
+    ),
+)
 
 
 def find_files(query: str = "", ext: str = "", folder: str = ".") -> str:
@@ -268,42 +338,6 @@ TOOLS = {
 }
 
 
-def _parse_response(content: str) -> dict[str, Any] | None:
-    """Model matnidan JSON obyektini fence yoki ortiqcha matnga chidamli ajratadi."""
-    candidate = content.strip()
-    if candidate.startswith("```"):
-        candidate = candidate.strip("`").strip()
-        if candidate.startswith("json"):
-            candidate = candidate[4:].strip()
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        try:
-            parsed = json.loads(candidate[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _get_message_content(response: Any) -> str:
-    """Ollama javobidan assistant xabarining matnini oladi."""
-    message = (
-        response.get("message", {})
-        if isinstance(response, dict)
-        else getattr(response, "message", None)
-    )
-    content = (
-        message.get("content", "")
-        if isinstance(message, dict)
-        else getattr(message, "content", "")
-    )
-    return content if isinstance(content, str) else ""
-
-
 def _show_preview(result: str) -> None:
     """Vosita natijasining terminalda ko'rinadigan qisqa nusxasini chiqaradi."""
     preview = " ".join(result.split())
@@ -312,70 +346,86 @@ def _show_preview(result: str) -> None:
     print(f"[natija] {preview}")
 
 
-def run_task(task: str) -> None:
+def run_task(
+    task: str,
+    *,
+    model: str = MODEL,
+    client: LLMClient | None = None,
+) -> None:
     """Bitta foydalanuvchi vazifasini 8 tagacha vosita qadami bilan bajaradi."""
-    history: list[dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": task},
-    ]
+    llm_client = client if client is not None else OllamaClient(model=model)
+    history = [ChatMessage(role="user", content=task)]
     steps = 0
 
     while True:
         try:
-            response = ollama.chat(model=MODEL, messages=history, format="json")
-            content = _get_message_content(response)
-        except Exception as exc:
+            response = llm_client.chat(
+                history,
+                system_prompt=SYSTEM_PROMPT,
+                tools=TOOL_DEFINITIONS,
+            )
+        except LLMError as exc:
             print(
-                "XATO: Ollama bilan bog'lanib bo'lmadi. "
-                f"`ollama serve` ishlayotganini tekshiring. Model yuklanmagan bo'lsa, "
-                f"`ollama pull {MODEL}` buyrug'ini bajaring. ({exc})"
+                f"XATO: Ollama so'rovi bajarilmadi ({type(exc).__name__}): {exc}. "
+                f"`ollama serve` va `{model}` modeli mavjudligini tekshiring."
             )
             return
 
-        history.append({"role": "assistant", "content": content})
-        parsed = _parse_response(content)
-        if parsed is not None and isinstance(parsed.get("final"), str):
-            print(f"Agent: {parsed['final']}")
+        if not response.tool_calls:
+            print(f"Agent: {response.content}")
             return
 
-        tool_name = parsed.get("tool") if parsed else "<JSON>"
-        args = parsed.get("args", {}) if parsed else {}
-        if not isinstance(tool_name, str) or not tool_name:
-            tool_name = "<JSON>"
-        if not isinstance(args, dict):
-            args = {}
-
-        if steps >= MAX_STEPS:
-            print("Vazifa 8 qadamdan oshdi. Iltimos, vazifani kichikroq qismlarga ajrating.")
-            return
-
-        steps += 1
-        print(
-            f"[step] Vosita: {tool_name} "
-            f"args={json.dumps(args, ensure_ascii=False, sort_keys=True)}"
-        )
-        if parsed is None or tool_name == "<JSON>":
-            result = "XATO: Javob JSON emas yoki tool nomi/args maydonlari noto'g'ri."
-        elif tool_name not in TOOLS:
-            result = (
-                f"XATO: Noma'lum vosita '{tool_name}'. "
-                f"Mavjud vositalar: {', '.join(TOOLS)}."
+        if len(response.tool_calls) > MAX_STEPS - steps:
+            print(
+                f"Vazifa {MAX_STEPS} vosita qadamidan oshdi. "
+                "Iltimos, vazifani kichikroq qismlarga ajrating."
             )
-        else:
+            return
+
+        history.append(response.assistant_message)
+        native_tool_calls = response.assistant_message.tool_calls is not None
+        for tool_call in response.tool_calls:
+            steps += 1
+            tool_name = tool_call.name
+            args = tool_call.arguments
+            print(
+                f"[step] Vosita: {tool_name} "
+                f"args={json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+            )
             try:
                 result = TOOLS[tool_name](**args)
-            except TypeError as exc:
-                result = f"XATO: Vosita argumentlari noto'g'ri: {exc}"
             except Exception as exc:
                 result = f"XATO: Vosita bajarilmadi: {exc}"
 
-        _show_preview(result)
-        history.append({"role": "user", "content": f"Vosita natijasi: {result}"})
+            _show_preview(result)
+            if native_tool_calls:
+                history.append(
+                    ChatMessage(role="tool", tool_name=tool_name, content=result)
+                )
+            else:
+                history.append(
+                    ChatMessage(role="user", content=f"Vosita natijasi: {result}")
+                )
 
 
 def main() -> None:
     """Terminaldagi interaktiv suhbatni boshlaydi va exit buyruqlarini boshqaradi."""
-    print(f"Shaxsiy AI agent tayyor ({MODEL}). Chiqish uchun exit deb yozing.")
+    try:
+        settings = load_config()
+    except ConfigurationError as exc:
+        print(f"XATO: Konfiguratsiya noto'g'ri.\n{exc}")
+        return
+
+    ollama_client = OllamaClient(
+        model=settings.ollama.model,
+        host=settings.ollama.host,
+        timeout=settings.ollama.timeout,
+        max_retries=settings.agent.max_retries,
+    )
+    print(
+        f"Shaxsiy AI agent tayyor ({settings.ollama.model}). "
+        "Chiqish uchun exit deb yozing."
+    )
     try:
         while True:
             try:
@@ -387,7 +437,11 @@ def main() -> None:
                 print("Xayr!")
                 return
             if task:
-                run_task(task)
+                run_task(
+                    task,
+                    model=settings.ollama.model,
+                    client=ollama_client,
+                )
     except KeyboardInterrupt:
         print("\nXayr!")
 
