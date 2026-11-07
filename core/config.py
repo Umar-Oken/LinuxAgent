@@ -63,6 +63,8 @@ class AgentSettings(StrictModel):
     max_steps: int = Field(default=8, ge=1, le=100)
     max_tool_calls: int = Field(default=8, ge=1, le=100)
     max_retries: int = Field(default=2, ge=0, le=10)
+    max_action_retries: int = Field(default=1, ge=0, le=10)
+    max_task_seconds: float = Field(default=300.0, gt=0, le=86_400)
 
 
 def _validate_paths(value: object) -> list[Path]:

@@ -1,8 +1,10 @@
 """Tests for safe, permission-gated tool dispatch."""
 
 import asyncio
+import json
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -12,6 +14,14 @@ from core.tool_dispatcher import (
     ToolDispatcher,
 )
 from core.tool_registry import ToolDefinition, ToolRegistry
+from security.approval import (
+    ApprovalManager,
+    ApprovalRequest,
+    ApprovalResponse,
+    TrustedApprovalInterface,
+)
+from security.audit_logger import AuditLogger
+from security.permissions import PermissionEngine, PermissionPolicy, PolicyDecision
 
 
 class EchoArguments(BaseModel):
@@ -231,3 +241,133 @@ def test_malformed_request_is_returned_as_safe_error() -> None:
 
     assert result.error_code == "INVALID_REQUEST"
     assert result.safe_error_message == "Tool request is malformed."
+
+
+def test_dispatch_requires_approval_and_rechecks_before_execution() -> None:
+    called = False
+
+    def implementation(text: str) -> str:
+        nonlocal called
+        called = True
+        return text
+
+    class ApproveInterface(TrustedApprovalInterface):
+        def request_approval(self, request: ApprovalRequest) -> ApprovalResponse:
+            assert request.action == 'mock_echo arguments={"text":"approved"}'
+            assert request.target_resource == "mock_echo"
+            assert request.potential_impact
+            return ApprovalResponse(
+                approval_id=request.approval_id,
+                decision="approve",
+            )
+
+    registry = ToolRegistry()
+    definition = _definition(implementation)
+    definition = definition.model_copy(update={"permission_level": "CONTROLLED"})
+    registry.register(definition)
+    dispatcher = ToolDispatcher(
+        registry,
+        permission_checker=PermissionEngine(
+            PermissionPolicy(),
+            ApprovalManager(ApproveInterface()),
+        ),
+    )
+
+    result = asyncio.run(
+        dispatcher.dispatch(
+            {"name": "mock_echo", "arguments": {"text": "approved"}}
+        )
+    )
+
+    assert result.status == "success"
+    assert called
+
+
+def test_dispatch_denies_if_pre_execution_recheck_fails() -> None:
+    called = False
+
+    def implementation(text: str) -> str:
+        nonlocal called
+        called = True
+        return text
+
+    class RecheckingPermission:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def prepare(
+            self,
+            tool: ToolDefinition,
+            arguments: Mapping[str, Any],
+        ) -> PolicyDecision:
+            self.checks += 1
+            return PolicyDecision.ALLOW
+
+        def authorize(
+            self,
+            tool: ToolDefinition,
+            arguments: Mapping[str, Any],
+        ) -> bool:
+            self.checks += 1
+            return False
+
+    result = asyncio.run(
+        _dispatcher(
+            implementation,
+            permission_checker=RecheckingPermission(),
+        ).dispatch({"name": "mock_echo", "arguments": {"text": "x"}})
+    )
+
+    assert result.status == "denied"
+    assert result.error_code == "PERMISSION_DENIED"
+    assert not called
+
+
+def test_dispatch_audits_success_denial_and_execution_error(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    audit_logger = AuditLogger(path)
+    try:
+        success = _dispatcher(
+            lambda text: text,
+            permission_checker=AllowPermissionChecker(),
+        )
+        success._audit_logger = audit_logger
+        denied = _dispatcher(
+            lambda text: text,
+            permission_checker=DenyByDefaultPermissionChecker(),
+        )
+        denied._audit_logger = audit_logger
+        failed = _dispatcher(
+            lambda text: (_ for _ in ()).throw(RuntimeError("internal detail")),
+            permission_checker=AllowPermissionChecker(),
+        )
+        failed._audit_logger = audit_logger
+
+        asyncio.run(success.dispatch(
+            {"name": "mock_echo", "arguments": {"text": "safe"}},
+            task_id="success-task",
+        ))
+        asyncio.run(denied.dispatch(
+            {"name": "mock_echo", "arguments": {"text": "safe"}},
+            task_id="denied-task",
+        ))
+        failure = asyncio.run(failed.dispatch(
+            {"name": "mock_echo", "arguments": {"text": "safe"}},
+            task_id="failed-task",
+        ))
+    finally:
+        audit_logger.close()
+
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [event["execution_status"] for event in events] == [
+        "success",
+        "denied",
+        "error",
+    ]
+    assert [event["task_id"] for event in events] == [
+        "success-task",
+        "denied-task",
+        "failed-task",
+    ]
+    assert "internal detail" not in path.read_text()
+    assert failure.safe_error_message == "Tool execution failed."

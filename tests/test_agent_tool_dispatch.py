@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent import _CliPermissionChecker, create_tool_registry
+from agent import create_tool_registry
 from core.tool_dispatcher import ToolDispatcher, ToolResult
 from core.tool_registry import ToolDefinition
 from security.path_guard import PathGuard
@@ -101,10 +101,7 @@ def test_save_note_requires_confirmation_and_writes_only_under_allowed_root(
 ) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     guard = PathGuard([tmp_path])
-    dispatcher = ToolDispatcher(
-        create_tool_registry(guard),
-        permission_checker=_CliPermissionChecker("writes"),
-    )
+    dispatcher = _dispatcher(guard)
     confirmations = iter(("ha",))
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(confirmations))
     try:

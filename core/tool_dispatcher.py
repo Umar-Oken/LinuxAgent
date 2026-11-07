@@ -15,6 +15,7 @@ import json
 import time
 from collections.abc import Awaitable, Mapping
 from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -26,6 +27,7 @@ from core.tool_registry import (
     ToolRegistryError,
     UnknownToolError,
 )
+from security.audit_logger import AuditLogger
 
 ToolStatus = Literal["success", "error", "timeout", "denied"]
 
@@ -87,6 +89,7 @@ class ToolDispatcher:
         *,
         permission_checker: PermissionChecker | None = None,
         max_result_bytes: int = 16_384,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         if max_result_bytes < 1:
             raise ValueError("max_result_bytes must be greater than zero")
@@ -97,8 +100,62 @@ class ToolDispatcher:
             else DenyByDefaultPermissionChecker()
         )
         self._max_result_bytes = max_result_bytes
+        self._audit_logger = audit_logger
 
-    async def dispatch(self, request: object) -> ToolResult:
+    @property
+    def audit_logger(self) -> AuditLogger | None:
+        return self._audit_logger
+
+    async def dispatch(
+        self,
+        request: object,
+        *,
+        task_id: str | None = None,
+    ) -> ToolResult:
+        """Dispatch a tool and record one redacted audit event."""
+        effective_task_id = task_id or str(uuid4())
+        started = time.monotonic()
+        try:
+            result = await self._dispatch(request, task_id=effective_task_id)
+        except Exception:
+            result = self._error(
+                _extract_tool_name(request),
+                "INTERNAL_ERROR",
+                "Tool execution failed.",
+                started,
+            )
+        if self._audit_logger is not None:
+            name, arguments = _audit_request_fields(request)
+            decision = (
+                "deny"
+                if result.status == "denied"
+                else "not_required"
+                if result.error_code in {"INVALID_REQUEST", "UNKNOWN_TOOL", "TOOL_DISABLED", "INVALID_ARGUMENTS"}
+                else "allow"
+            )
+            try:
+                self._audit_logger.log_tool(
+                    task_id=effective_task_id,
+                    tool_name=name or result.tool_name,
+                    arguments=arguments,
+                    permission_decision=decision,
+                    execution_status=result.status,
+                    duration_seconds=max(
+                        result.execution_duration,
+                        time.monotonic() - started,
+                    ),
+                    error_code=result.error_code,
+                )
+            except Exception:
+                result = self._error(
+                    result.tool_name,
+                    "AUDIT_LOG_ERROR",
+                    "Audit logging failed; the tool may have completed. Check its effects before retrying.",
+                    started,
+                )
+        return result
+
+    async def _dispatch(self, request: object, *, task_id: str) -> ToolResult:
         """Run one validated, authorized tool call and return a safe result."""
         started = time.monotonic()
         tool_name = _extract_tool_name(request)
@@ -154,12 +211,51 @@ class ToolDispatcher:
             )
         arguments = validated_model.model_dump(mode="python")
 
+        prepare = getattr(self._permission_checker, "prepare", None)
+        authorize = getattr(self._permission_checker, "authorize", None)
+        two_phase = callable(prepare) and callable(authorize)
+        if two_phase:
+            try:
+                prepared = _invoke_permission_method(
+                    prepare,
+                    definition,
+                    copy.deepcopy(arguments),
+                    task_id,
+                )
+                if inspect.isawaitable(prepared):
+                    prepared = await prepared
+            except Exception:
+                return self._error(
+                    tool_name,
+                    "AUTHORIZATION_ERROR",
+                    "Tool authorization could not be completed.",
+                    started,
+                    status="denied",
+                )
+            if not _is_allowed(prepared):
+                return self._error(
+                    tool_name,
+                    "PERMISSION_DENIED",
+                    "Tool execution was not authorized.",
+                    started,
+                    status="denied",
+                )
+
         try:
-            authorization_arguments = copy.deepcopy(arguments)
-            allowed = self._permission_checker.is_allowed(
-                definition,
-                authorization_arguments,
-            )
+            if two_phase:
+                allowed = _invoke_permission_method(
+                    authorize,
+                    definition,
+                    copy.deepcopy(arguments),
+                    task_id,
+                )
+            else:
+                allowed = _invoke_permission_method(
+                    self._permission_checker.is_allowed,
+                    definition,
+                    copy.deepcopy(arguments),
+                    task_id,
+                )
             if inspect.isawaitable(allowed):
                 allowed = await allowed
         except Exception:
@@ -170,7 +266,7 @@ class ToolDispatcher:
                 started,
                 status="denied",
             )
-        if allowed is not True:
+        if not _is_allowed(allowed):
             return self._error(
                 tool_name,
                 "PERMISSION_DENIED",
@@ -279,6 +375,34 @@ def _extract_tool_name(
     return name if isinstance(name, str) and len(name) <= 64 else "<invalid>"
 
 
+def _audit_request_fields(request: object) -> tuple[str, dict[str, Any]]:
+    try:
+        call = _validate_request(request)
+    except ValidationError:
+        return _extract_tool_name(request), {}
+    return call.name, call.arguments
+
+
+def _invoke_permission_method(
+    method: Any,
+    definition: ToolDefinition,
+    arguments: dict[str, Any],
+    task_id: str,
+) -> Any:
+    try:
+        parameters = inspect.signature(method).parameters.values()
+        accepts_task_id = any(
+            parameter.name == "task_id"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        accepts_task_id = False
+    if accepts_task_id:
+        return method(definition, arguments, task_id=task_id)
+    return method(definition, arguments)
+
+
 def _serialized_size(value: Any, maximum: int) -> int:
     encoder = json.JSONEncoder(
         ensure_ascii=False,
@@ -291,3 +415,7 @@ def _serialized_size(value: Any, maximum: int) -> int:
         if size > maximum:
             return size
     return size
+
+
+def _is_allowed(decision: object) -> bool:
+    return decision is True or getattr(decision, "value", None) == "allow"

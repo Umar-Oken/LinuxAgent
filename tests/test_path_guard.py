@@ -125,6 +125,35 @@ def test_denies_sensitive_file_even_inside_allowed_root(allowed_root: Path) -> N
         guard.close()
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".ssh/id_ed25519",
+        ".aws/credentials",
+        ".config/credentials/account.json",
+        ".config/chromium/Default/Login Data",
+        "credentials.json",
+    ],
+)
+def test_denies_sensitive_locations_inside_allowed_root(
+    allowed_root: Path,
+    relative_path: str,
+) -> None:
+    target = allowed_root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("sensitive", encoding="utf-8")
+    guard = PathGuard([allowed_root])
+
+    try:
+        with pytest.raises(PathAccessError) as error:
+            guard.authorize_path(target)
+        assert error.value.code == "PROTECTED_PATH"
+        with pytest.raises(PathAccessError):
+            guard.open_file(target)
+    finally:
+        guard.close()
+
+
 def test_sensitive_path_requires_explicit_policy_and_root(
     allowed_root: Path,
 ) -> None:

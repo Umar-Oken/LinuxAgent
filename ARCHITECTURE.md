@@ -128,10 +128,34 @@ or a separately isolated process design.
 All six existing tools are registered with Pydantic argument models,
 categories, permission levels, timeouts, and explicit implementations. The
 agent advertises only enabled registry schemas and routes calls through the
-dispatcher. The CLI permission checker allows read-only tools by default under
-the `writes` policy, prompts for controlled operations, and always denies
-prohibited or sensitive tools. `save_note` preserves its own required `ha`
-confirmation before writing.
+dispatcher. `security/permissions.py` evaluates the registered tool identity,
+validated arguments, target resource, permission level, and configured
+`approval_policy`. Read-only calls are allowed under `writes`; controlled and
+sensitive calls require approval; prohibited calls are always denied.
+`security/approval.py` accepts decisions only from an injected trusted
+interface. Approval requests display the action, target, impact, and ID; grants
+are bound to the exact tool and arguments, expire, and are consumed once.
+Dispatcher authorization is rechecked immediately before execution. Without a
+trusted approval interface, actions requiring approval fail closed.
+`save_note` also preserves its existing `ha` confirmation before writing.
+
+## Audit logging and user-safe errors
+
+`security/audit_logger.py` writes structured JSON Lines to the XDG application
+data directory (`personal-ai-agent/audit.jsonl`). Audit records include UTC
+time, per-process session ID, task ID, tool, sanitized arguments, permission
+decision, status, duration, and a stable error code. Values associated with
+credentials are redacted; document/text values and local paths are omitted.
+Tool result bodies, exception messages, and tracebacks are never logged.
+
+The audit directory is restricted to the current user, files are created with
+mode `0600`, and logs rotate at 5 MiB with five backups. Configured logging
+retention removes expired active/rotated files. Approval and tool events are
+written through their respective managers. If approval logging fails, the
+approval fails closed. If logging fails after a tool call, the result reports
+that the tool may have completed so the user can check effects before retrying.
+`security/error_handler.py` maps known application errors to safe terminal
+messages without including exception details.
 
 ## Filesystem access guard
 
@@ -166,8 +190,8 @@ The intended lifecycle is:
    before invoking a tool.
 6. Execute only registered application functions; never execute model-generated
    shell commands or Python code.
-7. Treat tool results and external content as untrusted data, record the
-   appropriate audit information, and return a bounded result to the model.
+7. Treat tool results and external content as untrusted data, record redacted
+   audit metadata, and return a bounded result to the model.
 8. Continue until a validated final answer is produced or a configured limit
    is reached, then render the outcome through the interface.
 
