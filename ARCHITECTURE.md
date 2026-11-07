@@ -131,6 +131,26 @@ legacy inline dispatch path. This dispatcher therefore does not yet mediate
 those legacy calls; migration must route them through the registry and an
 explicit permission checker before it replaces that path.
 
+## Filesystem access guard
+
+`security/path_guard.py` grants access only to roots explicitly passed to
+`PathGuard`; it never defaults to the home directory. SSH, credential, browser
+profile, and system locations are denied even when nested under an allowed
+root, unless `allow_sensitive=True` is deliberately configured (and the path
+must still be under an allowed root). Existing paths are required by default;
+missing write targets must be explicitly permitted with `allow_missing=True`.
+Use `open_file` for actual reads/writes: it traverses directory descriptors
+with no-follow semantics and returns an owned file descriptor, while
+`authorize_path` only validates a location and cannot pin it against a later
+filesystem change. Symlinks are rejected by descriptor-relative opens, even
+when their target remains within an allowed root.
+
+Portable Python cannot prevent another privileged process from renaming an
+already-open directory outside the allowed tree. The guard avoids detached
+worker operations and symlink-based TOCTOU races but documents this residual
+directory-rename limitation; stronger Linux-only confinement would require
+`openat2` with beneath/no-symlink resolution.
+
 ## Tool execution lifecycle
 
 The target lifecycle is:
