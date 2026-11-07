@@ -51,7 +51,6 @@ def test_run_task_executes_native_tool_call_and_continues(capsys: Any) -> None:
         [
             LLMResponse(
                 content="",
-                thinking="private model reasoning",
                 tool_calls=[
                     ToolCall(
                         name="calculate",
@@ -90,7 +89,6 @@ def test_run_task_executes_native_tool_call_and_continues(capsys: Any) -> None:
     output = capsys.readouterr().out
     assert "[step] Vosita: calculate" in output
     assert "Agent: Javob: 42" in output
-    assert "private model reasoning" not in output
     assert client.calls[0]["system_prompt"]
     assert {tool.name for tool in client.calls[0]["tools"]} == {
         "find_files",
@@ -101,10 +99,6 @@ def test_run_task_executes_native_tool_call_and_continues(capsys: Any) -> None:
         "get_weather",
     }
     next_history = client.calls[1]["history"]
-    assert all(
-        "private model reasoning" not in item.content
-        for item in next_history
-    )
     assert next_history[1].role == "assistant"
     assert next_history[1].tool_calls is not None
     assert next_history[2].role == "tool"

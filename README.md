@@ -5,7 +5,7 @@
 Ubuntu'da Python 3.10+ va [Ollama](https://ollama.com/) o'rnating, keyin:
 
 ```bash
-ollama pull qwen3:4b
+ollama pull gemma4:e2b-it-qat
 python3 -m pip install -r requirements.txt
 python3 agent.py
 ```
@@ -27,9 +27,8 @@ Masalan:
 ```yaml
 ollama:
   host: http://127.0.0.1:11434
-  model: qwen3:4b
+  model: gemma4:e2b-it-qat
   timeout: 60
-  think: false
 agent:
   max_steps: 8
   max_tool_calls: 8
@@ -49,12 +48,8 @@ logging:
 
 Qo'llab-quvvatlanadigan environment override'lari `AGENT_` prefiksidan,
 bo'lim nomidan va maydon nomidan tuziladi: masalan,
-`AGENT_OLLAMA_MODEL=qwen3:4b`, `AGENT_OLLAMA_THINK=true` yoki
+`AGENT_OLLAMA_MODEL=gemma4:e2b-it-qat` yoki
 `AGENT_AGENT_MAX_STEPS=10`.
-Qwen3 uchun `think` standart holatda `false`; zarur bo'lsa konfiguratsiyada
-`true` qilib yoqish mumkin. Fikrlash matni javobdan alohida saqlanadi, foydalanuvchiga
-ko'rsatilmaydi, loglanmaydi va suhbat tarixiga qo'shilmaydi. Ollama uni alohida
-maydonda bermasa, adapter `<think>` belgilangan bloklarni ajratadi.
 Ro'yxat qiymatlari JSON massiv bo'lishi kerak, masalan
 `AGENT_SECURITY_ALLOWED_ROOTS='["/home/user/work"]'`. Environment qiymati YAML
 qiymatidan ustun turadi. Parol, token va boshqa maxfiy qiymatlarni YAML'ga

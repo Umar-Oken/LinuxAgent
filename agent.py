@@ -676,7 +676,6 @@ def main() -> None:
         model=settings.ollama.model,
         host=settings.ollama.host,
         timeout=settings.ollama.timeout,
-        think=settings.ollama.think,
         max_retries=settings.agent.max_retries,
     )
     print(

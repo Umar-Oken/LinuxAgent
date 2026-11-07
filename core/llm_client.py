@@ -50,12 +50,11 @@ class ToolCall(BaseModel):
 
 
 class LLMResponse(BaseModel):
-    """Normalized response; thinking remains separate from conversation history."""
+    """Normalized model response and any structured tool calls."""
 
     model_config = ConfigDict(extra="forbid")
 
     content: str
-    thinking: str = Field(default="", exclude=True, repr=False)
     tool_calls: list[ToolCall] = Field(default_factory=list)
     assistant_message: ChatMessage
 
@@ -148,7 +147,6 @@ class OllamaClient:
         model: str,
         host: str = "http://127.0.0.1:11434",
         timeout: float = 60.0,
-        think: bool = False,
         max_retries: int = 2,
         structured_json_supported: bool = True,
         transport: OllamaTransport | None = None,
@@ -165,7 +163,6 @@ class OllamaClient:
             raise ValueError("retry_delay must not be negative")
 
         self.model = model
-        self.think = think
         self.max_retries = max_retries
         self.structured_json_supported = structured_json_supported
         self._transport = (
@@ -210,7 +207,6 @@ class OllamaClient:
                 lambda: self._transport.chat(
                     model=self.model,
                     messages=messages,
-                    think=self.think,
                 )
             )
             return self._normalize_response(raw)
@@ -223,7 +219,6 @@ class OllamaClient:
                     model=self.model,
                     messages=messages,
                     tools=[self._ollama_tool(tool) for tool in tools],
-                    think=self.think,
                 )
             )
             return self._normalize_response(raw, tools)
@@ -239,7 +234,6 @@ class OllamaClient:
                 model=self.model,
                 messages=messages,
                 format=output_schema,
-                think=self.think,
             )
         )
         return self._normalize_structured_response(raw)
@@ -328,11 +322,6 @@ class OllamaClient:
         content = _read_field(message, "content", "")
         if not isinstance(content, str):
             raise LLMResponseError("Ollama response content must be text.")
-        content, thinking = self._separate_thinking(
-            content,
-            _read_field(message, "thinking", ""),
-        )
-
         raw_calls = _read_field(message, "tool_calls", []) or []
         if not isinstance(raw_calls, Sequence) or isinstance(raw_calls, (str, bytes)):
             raise LLMResponseError("Ollama tool_calls must be a list.")
@@ -350,7 +339,6 @@ class OllamaClient:
             )
             return LLMResponse(
                 content=content,
-                thinking=thinking,
                 tool_calls=tool_calls,
                 assistant_message=assistant_message,
             )
@@ -380,10 +368,6 @@ class OllamaClient:
         content = _read_field(message, "content")
         if not isinstance(content, str):
             raise LLMResponseError("Ollama structured response content must be text.")
-        content, thinking = self._separate_thinking(
-            content,
-            _read_field(message, "thinking", ""),
-        )
         try:
             structured = _StructuredOutput.model_validate_json(content)
         except (ValidationError, ValueError) as exc:
@@ -393,7 +377,6 @@ class OllamaClient:
             assistant_message = ChatMessage(role="assistant", content=structured.final)
             return LLMResponse(
                 content=structured.final,
-                thinking=thinking,
                 assistant_message=assistant_message,
             )
 
@@ -404,44 +387,9 @@ class OllamaClient:
         assistant_message = ChatMessage(role="assistant", content=content)
         return LLMResponse(
             content=content,
-            thinking=thinking,
             tool_calls=[call],
             assistant_message=assistant_message,
         )
-
-    @staticmethod
-    def _separate_thinking(content: str, explicit_thinking: Any) -> tuple[str, str]:
-        if explicit_thinking is None:
-            explicit_thinking = ""
-        if not isinstance(explicit_thinking, str):
-            raise LLMResponseError("Ollama thinking field must be text.")
-
-        thinking_parts = [explicit_thinking] if explicit_thinking.strip() else []
-        answer_parts: list[str] = []
-        cursor = 0
-        while cursor < len(content):
-            opening = content.find("<think>", cursor)
-            closing = content.find("</think>", cursor)
-            if closing >= 0 and (opening < 0 or closing < opening):
-                thinking_parts.append(content[cursor:closing])
-                cursor = closing + len("</think>")
-                continue
-            if opening < 0:
-                answer_parts.append(content[cursor:])
-                break
-
-            answer_parts.append(content[cursor:opening])
-            body_start = opening + len("<think>")
-            closing = content.find("</think>", body_start)
-            if closing < 0:
-                thinking_parts.append(content[body_start:])
-                break
-            thinking_parts.append(content[body_start:closing])
-            cursor = closing + len("</think>")
-
-        answer = "".join(answer_parts).strip()
-        thinking = "\n".join(part.strip() for part in thinking_parts if part.strip())
-        return answer, thinking
 
     def _validate_tool_call(self, call: ToolCall) -> None:
         validator = self._tool_validators.get(call.name)
