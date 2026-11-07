@@ -42,20 +42,18 @@ are declared in `requirements.txt`.
   state. This makes isolated testing and replacing dependencies harder.
 - **Configuration enforcement boundary:** `core/config.py` validates
   application settings, YAML input, environment overrides, and path shape.
-  Security policies, tool categories, and agent limits are not yet enforced by
-  tool execution; they remain configuration data until a later task wires them
-  into execution.
-- **Tool boundary:** Dispatch selects from a fixed dictionary, so model output
-  cannot choose an arbitrary Python function or shell command. However,
-  arguments are passed directly to tool functions without a shared typed
-  schema or centralized authorization policy.
-- **Filesystem scope:** `find_files` and `read_text` accept caller-supplied
-  paths without configured allowed roots. `read_text` limits extensions and
-  content length, and `save_note` asks for confirmation, but paths and writes
-  are not governed by a common security boundary.
-- **Untrusted results:** Tool output is appended to the model conversation.
-  Files and external API responses can contain untrusted text; there is no
-  explicit result trust boundary or audit log.
+  Allowed roots and enabled categories are enforced when constructing the
+  runtime registry and path guard. Agent step count remains bounded by the
+  existing loop limit.
+- **Tool boundary:** All six existing tools are selected from the explicit
+  registry; dispatcher validation and authorization are required before
+  implementations run. There is no model-generated code or command execution.
+- **Filesystem scope:** File search, reads, and note writes use `PathGuard`.
+  File operations are denied unless the user configures explicit allowed roots;
+  no home-directory root is granted automatically.
+- **Untrusted results:** Tool data is size-bounded, internal absolute paths are
+  redacted, and results are marked as untrusted in model history. No audit log
+  is persisted yet.
 - **Capability fallback:** The adapter checks model metadata before native tool
   use. If native tool calling is not advertised, it uses structured JSON
   output; there is no automatic model switch.
@@ -69,23 +67,24 @@ are declared in `requirements.txt`.
 - **No significant duplicated implementation** was identified in the current
   single-file code; the larger concern is separation of responsibilities.
 
-These are observations about the current implementation, not changes to its
-behavior. In particular, this task does not add path restrictions, alter model
-configuration, or change tool execution.
+This audit describes the repository before the incremental architecture tasks.
+The six-tool dispatch and filesystem findings below have since been addressed
+by the registry, dispatcher, and path-guard integration. SQLite persistence and
+the extraction of CLI orchestration remain future work.
 
 ## Proposed module responsibilities
 
-The directories below are package scaffolding. Configuration now lives in
-`core/config.py`; the rest of the implementation remains in `agent.py`; `core/llm_client.py` now defines the
-model interface and Ollama adapter used by the agent loop. `core/tool_registry.py`
-provides an explicit, schema-validated registry, but the existing six tools
-have not yet been migrated to it.
+Configuration lives in `core/config.py`; `core/llm_client.py` defines the
+model interface and Ollama adapter; and `core/tool_registry.py` holds the
+explicit schemas and implementations for the six existing tools. The working
+CLI entry point and tool implementations remain in `agent.py`. The dispatcher
+and path policy are in `core/tool_dispatcher.py` and `security/path_guard.py`.
 
 | Directory | Intended responsibility |
 |---|---|
-| `core/` | Agent orchestration, typed configuration, shared domain types, and model-independent interfaces such as `LLMClient`. |
-| `tools/` | Individual tool implementations; registry definitions are supplied explicitly and do not auto-import modules. Keep side effects behind explicit interfaces. |
-| `security/` | Tool argument validation, authorization and allowed-path policies, approval handling, and execution limits. |
+| `core/` | Typed configuration, LLM adapter, explicit tool registry, validation, authorization, dispatch, and current agent orchestration entry point. |
+| `tools/` | Future location for extracted implementations; no auto-import or discovery is used. |
+| `security/` | Allowed-path policy and symlink-resistant file access. |
 | `interfaces/` | Terminal presentation and input handling; future interfaces can use the core without adding GUI or speech processing now. |
 | `storage/` | Persistence adapters, including a future SQLite implementation for history and audit records. |
 | `tests/` | Unit and integration tests using temporary directories, fake model clients, and mocked external services. |
@@ -101,13 +100,13 @@ interfaces/  ->  core/  <-  tools/
             security/ and storage/
 ```
 
-The core orchestration depends on the `LLMClient` interface rather than the
-concrete Ollama SDK. The Ollama adapter implements the interface and
-normalizes native tool calls or schema-constrained JSON responses. Tool implementations may use
-security-approved capabilities and return data, but should not invoke the
-agent loop. The interface layer should call the core and render results; it
-should not own tool policy. Avoid circular imports. The exact module APIs will
-be defined when implementation is migrated in a later task.
+The agent loop depends on the `LLMClient` interface rather than the concrete
+Ollama SDK. The Ollama adapter normalizes native tool calls or schema-validated
+JSON responses. The registry contains only explicitly supplied callables;
+dispatch validates, authorizes, and executes them. File wrappers use
+`PathGuard` for actual reads and writes. Tool implementations return data and
+do not invoke the agent loop. The interface layer should render results but
+not own tool policy.
 
 ## Safe tool dispatch
 
@@ -126,10 +125,13 @@ only after the callable returns. A synchronous implementation that blocks can
 therefore block its caller; strict deadlines require cooperative async tools
 or a separately isolated process design.
 
-The current six tools have not been migrated and `agent.py` still uses its
-legacy inline dispatch path. This dispatcher therefore does not yet mediate
-those legacy calls; migration must route them through the registry and an
-explicit permission checker before it replaces that path.
+All six existing tools are registered with Pydantic argument models,
+categories, permission levels, timeouts, and explicit implementations. The
+agent advertises only enabled registry schemas and routes calls through the
+dispatcher. The CLI permission checker allows read-only tools by default under
+the `writes` policy, prompts for controlled operations, and always denies
+prohibited or sensitive tools. `save_note` preserves its own required `ha`
+confirmation before writing.
 
 ## Filesystem access guard
 
@@ -153,7 +155,7 @@ directory-rename limitation; stronger Linux-only confinement would require
 
 ## Tool execution lifecycle
 
-The target lifecycle is:
+The intended lifecycle is:
 
 1. Receive a user task through an interface and create a bounded task context.
 2. Ask the configured model for a response through an injected model client.
@@ -169,28 +171,24 @@ The target lifecycle is:
 8. Continue until a validated final answer is produced or a configured limit
    is reached, then render the outcome through the interface.
 
-The current implementation is simpler: it parses model JSON, looks up the
-function in `TOOLS`, calls it with parsed keyword arguments, adds its returned
-text to the conversation, and stops after a final response or eight tool
-steps. The target lifecycle is descriptive and is not implemented by this
-scaffold.
+The current implementation follows this lifecycle through step 7: it parses
+model responses through the adapter, advertises enabled registry schemas,
+dispatches and validates calls, enforces permission and time limits, and adds
+sanitized results as explicitly untrusted conversation data. It stops after a
+final response or eight tool steps and renders through the existing terminal
+loop. Configurable persistence, audit records, and extraction of orchestration
+from `agent.py` are not implemented.
 
 ## Migration strategy
 
-1. Keep `agent.py` as the working entry point and establish the package layout
-   without moving or rewriting behavior.
-2. Add tests around existing tools, response parsing, step limits, and CLI
-   exit handling before extracting implementations.
-3. Introduce typed configuration and model/tool interfaces, preserving current
-   defaults and command-line behavior.
-4. Migrate tools incrementally into the explicit registry and then centralize
-   authorization; add path-scope and approval tests before changing filesystem
-   behavior. The registry exists, but existing tool functions are not yet
-   registered through it.
-5. Move orchestration and terminal handling into `core/` and `interfaces/`,
+1. Keep `agent.py` as the working entry point while preserving behavior.
+2. Introduce typed configuration and the Ollama adapter.
+3. Register the six existing tools, route execution through the dispatcher,
+   and enforce explicit filesystem roots and approvals.
+4. Move orchestration and terminal handling into `core/` and `interfaces/`,
    retaining a compatibility entry point until parity is established.
-6. Add storage only when a later requirement defines persistence behavior;
+5. Add storage only when a later requirement defines persistence behavior;
    SQLite is not added as part of this preparation.
 
-Each migration step should preserve existing functionality and be tested
-before proceeding. This task does not advance beyond the initial scaffold.
+Steps 1-3 are implemented. The remaining items are future work and are not
+started automatically.

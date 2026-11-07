@@ -26,8 +26,9 @@ class StrictModel(BaseModel):
 
 class OllamaSettings(StrictModel):
     host: str = "http://127.0.0.1:11434"
-    model: str = "gemma4:e2b"
+    model: str = "qwen3:4b"
     timeout: float = Field(default=60.0, gt=0, le=600)
+    think: bool = False
 
     @field_validator("host")
     @classmethod

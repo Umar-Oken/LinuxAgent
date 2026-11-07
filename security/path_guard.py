@@ -227,7 +227,10 @@ class PathGuard:
                 try:
                     file_fd = os.open(
                         relative.parts[-1],
-                        flags | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        flags
+                        | os.O_CLOEXEC
+                        | os.O_NOFOLLOW
+                        | getattr(os, "O_NONBLOCK", 0),
                         mode,
                         dir_fd=parent_fd,
                     )
@@ -249,6 +252,48 @@ class PathGuard:
         except OSError as exc:
             os.close(file_fd)
             raise PathAccessError("INVALID_PATH", "Requested file could not be safely opened.") from exc
+
+    def open_directory(self, path: str | Path) -> int:
+        """Open an allowed directory using no-follow, descriptor-relative traversal."""
+        candidate = _candidate_path(path)
+        self.authorize_path(candidate)
+        root = self._find_lexical_root(candidate)
+        relative = candidate.relative_to(root)
+
+        with self._lock:
+            if self._closed:
+                raise PathAccessError("CLOSED", "Filesystem authorization is closed.")
+            current_fd = os.dup(self._root_fds[root])
+            try:
+                for component in relative.parts:
+                    next_fd = os.open(
+                        component,
+                        os.O_RDONLY
+                        | os.O_DIRECTORY
+                        | os.O_CLOEXEC
+                        | os.O_NOFOLLOW,
+                        dir_fd=current_fd,
+                    )
+                    os.close(current_fd)
+                    current_fd = next_fd
+                return current_fd
+            except OSError as exc:
+                os.close(current_fd)
+                raise self._translate_open_error(exc) from exc
+
+    def public_path(self, path: str | Path) -> str:
+        """Represent an authorized path with a stable root alias, not an absolute path."""
+        candidate = _candidate_path(path)
+        resolved = self.authorize_path(candidate)
+        for index, root in enumerate(self._roots):
+            if resolved.is_relative_to(root):
+                relative = resolved.relative_to(root)
+                suffix = relative.as_posix() if relative.parts else ""
+                return f"@root{index}/{suffix}".rstrip("/")
+        raise PathAccessError(
+            "OUTSIDE_ALLOWED_ROOT",
+            "Requested path is outside the configured filesystem roots.",
+        )
 
     def check_path(
         self,

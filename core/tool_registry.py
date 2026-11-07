@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 ToolCategory = Literal["filesystem", "system", "network", "calculation"]
-PermissionLevel = Literal["read", "write", "network", "system"]
+PermissionLevel = Literal["READ_ONLY", "CONTROLLED", "SENSITIVE", "PROHIBITED"]
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
@@ -152,6 +152,23 @@ class ToolRegistry:
         """Build model schemas only from registered and enabled tools."""
         return [
             definition.model_tool_schema()
+            for definition in self.list_tools(category=category, enabled_only=True)
+        ]
+
+    def llm_tool_definitions(
+        self,
+        *,
+        category: ToolCategory | None = None,
+    ) -> list[Any]:
+        """Create adapter definitions from the enabled registered Pydantic models."""
+        from core.llm_client import ToolDefinition as LLMToolDefinition
+
+        return [
+            LLMToolDefinition(
+                name=definition.name,
+                description=definition.description,
+                parameters=definition.argument_model.model_json_schema(),
+            )
             for definition in self.list_tools(category=category, enabled_only=True)
         ]
 

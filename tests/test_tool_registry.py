@@ -41,7 +41,7 @@ def _mock_tool(
             "additionalProperties": False,
         },
         argument_model=MockLookupArguments,
-        permission_level="read",
+        permission_level="READ_ONLY",
         execution_timeout=2,
         implementation=lambda query: f"found: {query}",
     )

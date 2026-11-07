@@ -27,8 +27,9 @@ def test_loads_valid_yaml_configuration(tmp_path: Path, monkeypatch: pytest.Monk
     config_file.write_text(
         """
 ollama:
-  model: local-model:latest
+  model: qwen3:4b
   timeout: 15
+  think: true
 agent:
   max_steps: 12
   max_tool_calls: 9
@@ -51,7 +52,8 @@ logging:
 
     settings = load_config(config_file)
 
-    assert settings.ollama.model == "local-model:latest"
+    assert settings.ollama.model == "qwen3:4b"
+    assert settings.ollama.think is True
     assert settings.ollama.host == "http://127.0.0.1:11434"
     assert settings.agent.max_steps == 12
     assert settings.security.allowed_roots == [Path("/tmp/agent-work")]
@@ -81,10 +83,11 @@ def test_environment_variables_override_yaml(
 ) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "ollama:\n  model: yaml-model\nagent:\n  max_steps: 3\n",
+        "ollama:\n  model: qwen3:4b-instruct\nagent:\n  max_steps: 3\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("AGENT_OLLAMA_MODEL", "environment-model")
+    monkeypatch.setenv("AGENT_OLLAMA_MODEL", "qwen3:4b")
+    monkeypatch.setenv("AGENT_OLLAMA_THINK", "true")
     monkeypatch.setenv("AGENT_AGENT_MAX_STEPS", "7")
     monkeypatch.setenv(
         "AGENT_SECURITY_ALLOWED_ROOTS",
@@ -93,12 +96,19 @@ def test_environment_variables_override_yaml(
 
     settings = load_config(config_file)
 
-    assert settings.ollama.model == "environment-model"
+    assert settings.ollama.model == "qwen3:4b"
+    assert settings.ollama.think is True
     assert settings.agent.max_steps == 7
     assert settings.security.allowed_roots == [
         Path("/tmp/work"),
         Path("/var/tmp/work"),
     ]
+
+
+def test_environment_can_disable_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_OLLAMA_THINK", "false")
+
+    assert load_config().ollama.think is False
 
 
 def test_missing_optional_file_uses_safe_defaults(
@@ -111,7 +121,8 @@ def test_missing_optional_file_uses_safe_defaults(
 
     assert isinstance(settings, AppSettings)
     assert settings.ollama.host == "http://127.0.0.1:11434"
-    assert settings.ollama.model == "gemma4:e2b"
+    assert settings.ollama.model == "qwen3:4b"
+    assert settings.ollama.think is False
     assert settings.agent.max_steps == 8
     assert settings.security.allowed_roots == []
     assert settings.security.approval_policy == "writes"

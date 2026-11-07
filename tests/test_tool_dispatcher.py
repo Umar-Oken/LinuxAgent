@@ -40,7 +40,7 @@ def _definition(
         category="system",
         argument_schema=EchoArguments.model_json_schema(),
         argument_model=EchoArguments,
-        permission_level="read",
+        permission_level="READ_ONLY",
         execution_timeout=timeout,
         implementation=implementation,
     )
