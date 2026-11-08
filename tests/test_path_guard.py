@@ -131,8 +131,11 @@ def test_denies_sensitive_file_even_inside_allowed_root(allowed_root: Path) -> N
         ".ssh/id_ed25519",
         ".aws/credentials",
         ".config/credentials/account.json",
+        ".config/gh/hosts.yml",
+        ".config/gcloud/application_default_credentials.json",
         ".config/chromium/Default/Login Data",
         "credentials.json",
+        "credentials/account.json",
     ],
 )
 def test_denies_sensitive_locations_inside_allowed_root(
@@ -178,6 +181,42 @@ def test_denies_system_path_even_when_configured_as_root() -> None:
         with pytest.raises(PathAccessError) as error:
             guard.authorize_path(target)
         assert error.value.code == "PROTECTED_PATH"
+    finally:
+        guard.close()
+
+
+def test_system_path_requires_explicit_policy() -> None:
+    system_root = Path("/etc")
+    target = system_root / "hosts"
+    if not target.is_file():
+        pytest.skip("/etc/hosts is not available on this system")
+    guard = PathGuard([system_root], allow_sensitive=True)
+
+    try:
+        with pytest.raises(PathAccessError) as error:
+            guard.authorize_path(target)
+        assert error.value.code == "PROTECTED_PATH"
+    finally:
+        guard.close()
+
+    guard = PathGuard([system_root], allow_system=True)
+    try:
+        assert guard.authorize_path(target) == target
+    finally:
+        guard.close()
+
+
+def test_open_file_rejects_directory_without_leaking_descriptor(
+    allowed_root: Path,
+) -> None:
+    directory = allowed_root / "nested"
+    directory.mkdir()
+    guard = PathGuard([allowed_root])
+
+    try:
+        with pytest.raises(PathAccessError) as error:
+            guard.open_file(directory)
+        assert error.value.code == "NOT_REGULAR_FILE"
     finally:
         guard.close()
 

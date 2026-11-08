@@ -229,6 +229,24 @@ def test_user_policy_can_prohibit_or_require_approval_for_specific_tool() -> Non
     )
 
 
+def test_policy_configuration_is_snapshotted_and_invalid_context_is_denied() -> None:
+    tool = _tool(PermissionLevel.READ_ONLY)
+    prohibited_tools = {"mock_action"}
+    policy = PermissionPolicy(prohibited_tools=prohibited_tools)  # type: ignore[arg-type]
+    prohibited_tools.clear()
+
+    assert policy.evaluate(_context(tool, {})) == PolicyOutcome.DENY
+    invalid_context = _context(tool, {})
+    invalid_context = PermissionContext(
+        tool_identifier=invalid_context.tool_identifier,
+        requested_arguments=invalid_context.requested_arguments,
+        target_resource=invalid_context.target_resource,
+        permission_level=invalid_context.permission_level,
+        approval_policy="unexpected",  # type: ignore[arg-type]
+    )
+    assert policy.evaluate(invalid_context) == PolicyOutcome.DENY
+
+
 def test_untrusted_or_mismatched_interface_response_is_denied() -> None:
     interface = FixedInterface(wrong_id=True)
     manager = ApprovalManager(interface)

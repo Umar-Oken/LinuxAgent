@@ -52,9 +52,17 @@ class PermissionPolicy:
     ) -> None:
         if approval_policy not in {"writes", "always"}:
             raise ValueError("unsupported approval policy")
+        if not isinstance(prohibited_tools, (set, frozenset)) or not all(
+            isinstance(name, str) and name for name in prohibited_tools
+        ):
+            raise ValueError("prohibited_tools must contain non-empty tool names")
+        if not isinstance(approval_required_tools, (set, frozenset)) or not all(
+            isinstance(name, str) and name for name in approval_required_tools
+        ):
+            raise ValueError("approval_required_tools must contain non-empty tool names")
         self._approval_policy = approval_policy
-        self._prohibited_tools = prohibited_tools
-        self._approval_required_tools = approval_required_tools
+        self._prohibited_tools = frozenset(prohibited_tools)
+        self._approval_required_tools = frozenset(approval_required_tools)
 
     @property
     def approval_policy(self) -> Literal["writes", "always"]:
@@ -65,9 +73,12 @@ class PermissionPolicy:
         context: PermissionContext,
     ) -> PolicyOutcome:
         if (
-            not context.tool_identifier
+            not isinstance(context.tool_identifier, str)
+            or not context.tool_identifier
+            or not isinstance(context.target_resource, str)
             or not context.target_resource
             or context.tool_identifier in self._prohibited_tools
+            or context.approval_policy not in {"writes", "always"}
         ):
             return PolicyOutcome.DENY
         try:

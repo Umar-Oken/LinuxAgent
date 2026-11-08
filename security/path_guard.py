@@ -95,10 +95,12 @@ class PathGuard:
         *,
         protected_paths: list[str | Path] | tuple[str | Path, ...] = (),
         allow_sensitive: bool = False,
+        allow_system: bool = False,
     ) -> None:
         self._lock = RLock()
         self._closed = False
         self._allow_sensitive = allow_sensitive
+        self._allow_system = allow_system
         roots: list[Path] = []
         for configured_root in allowed_roots:
             root = _resolve_configured_root(configured_root)
@@ -245,13 +247,13 @@ class PathGuard:
 
         try:
             file_stat = os.fstat(file_fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                os.close(file_fd)
-                raise PathAccessError("NOT_REGULAR_FILE", "Requested path is not a regular file.")
-            return file_fd
         except OSError as exc:
             os.close(file_fd)
             raise PathAccessError("INVALID_PATH", "Requested file could not be safely opened.") from exc
+        if not stat.S_ISREG(file_stat.st_mode):
+            os.close(file_fd)
+            raise PathAccessError("NOT_REGULAR_FILE", "Requested path is not a regular file.")
+        return file_fd
 
     def open_directory(self, path: str | Path) -> int:
         """Open an allowed directory using no-follow, descriptor-relative traversal."""
@@ -335,9 +337,16 @@ class PathGuard:
             )
 
     def _ensure_not_protected(self, candidate: Path, resolved: Path) -> None:
-        if self._allow_sensitive:
-            return
         paths_to_check = (candidate, resolved)
+        if not self._allow_system and any(
+            path.is_relative_to(system_path)
+            for path in paths_to_check
+            for system_path in _SYSTEM_PATHS
+        ):
+            raise PathAccessError(
+                "PROTECTED_PATH",
+                "System directories are protected by filesystem policy.",
+            )
         if any(
             path.is_relative_to(protected)
             for path in paths_to_check
@@ -347,19 +356,12 @@ class PathGuard:
                 "PROTECTED_PATH",
                 "Requested path is protected by filesystem policy.",
             )
+        if self._allow_sensitive:
+            return
         if any(_is_sensitive_path(path) for path in paths_to_check):
             raise PathAccessError(
                 "PROTECTED_PATH",
                 "Requested path is protected by filesystem policy.",
-            )
-        if any(
-            path.is_relative_to(system_path)
-            for path in paths_to_check
-            for system_path in _SYSTEM_PATHS
-        ):
-            raise PathAccessError(
-                "PROTECTED_PATH",
-                "System directories are protected by filesystem policy.",
             )
 
     def _find_lexical_root(self, candidate: Path) -> Path:
@@ -432,8 +434,13 @@ def _resolve_destination(candidate: Path) -> Path:
 
 def _is_sensitive_path(path: Path) -> bool:
     parts = tuple(part.casefold() for part in path.parts)
-    if any(part == component.casefold() for part in parts for component in _SENSITIVE_COMPONENTS):
-        return True
+    for component in _SENSITIVE_COMPONENTS:
+        component_parts = tuple(part.casefold() for part in Path(component).parts)
+        if any(
+            parts[index : index + len(component_parts)] == component_parts
+            for index in range(len(parts) - len(component_parts) + 1)
+        ):
+            return True
     filename = path.name.casefold()
     if filename in _SENSITIVE_FILENAMES:
         return True

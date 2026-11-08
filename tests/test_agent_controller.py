@@ -288,3 +288,80 @@ def test_repeated_failed_operation_is_limited_by_action_retry_budget(
         assert called == []
     finally:
         guard.close()
+
+
+def test_unexpected_llm_failure_is_reported_without_internal_details(
+    tmp_path: Path,
+) -> None:
+    controller, _client, called, guard = _setup(
+        tmp_path,
+        [RuntimeError("private endpoint and credential detail")],
+    )
+    messages: list[str] = []
+    controller._output = messages.append
+
+    try:
+        result = controller.run_task("service unavailable")
+        assert result.status == "llm_error"
+        assert called == []
+        assert messages == ["XATO: Kutilmagan xatolik yuz berdi."]
+    finally:
+        guard.close()
+
+
+def test_cancellation_during_tool_waits_for_current_call_then_stops(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    controller, client, called, guard = _setup(
+        tmp_path,
+        [_response_for_tool("mock_echo", "one"), _final()],
+    )
+    cancellation = Event()
+    original_execute = controller._dispatcher._execute
+
+    async def execute(definition: ToolDefinition, arguments: dict[str, Any]) -> Any:
+        result = await original_execute(definition, arguments)
+        cancellation.set()
+        return result
+
+    monkeypatch.setattr(controller._dispatcher, "_execute", execute)
+
+    try:
+        result = controller.run_task("cancel during tool", cancellation=cancellation)
+        assert result.status == "cancelled"
+        assert result.tool_calls == 1
+        assert called == ["one"]
+        assert len(client.calls) == 1
+    finally:
+        guard.close()
+
+
+def test_tool_completion_after_deadline_stops_before_next_model_call(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = [0.0]
+    controller, client, called, guard = _setup(
+        tmp_path,
+        [_response_for_tool("mock_echo", "one"), _final()],
+    )
+    controller._max_task_seconds = 1
+    controller._clock = lambda: now[0]
+    original_execute = controller._dispatcher._execute
+
+    async def slow(definition: ToolDefinition, arguments: dict[str, Any]) -> Any:
+        result = await original_execute(definition, arguments)
+        now[0] = 2.0
+        return result
+
+    monkeypatch.setattr(controller._dispatcher, "_execute", slow)
+
+    try:
+        result = controller.run_task("slow tool")
+        assert result.status == "time_limit"
+        assert result.tool_calls == 1
+        assert called == ["one"]
+        assert len(client.calls) == 1
+    finally:
+        guard.close()

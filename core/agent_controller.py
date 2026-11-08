@@ -93,7 +93,12 @@ class AgentController:
         *,
         cancellation: Event | None = None,
     ) -> AgentTaskResult:
-        """Run until a final answer, cancellation, or a configured limit."""
+        """Run a bounded task; cancellation is observed between blocking calls.
+
+        A synchronous model or tool callable cannot be forcibly interrupted.
+        Its own transport/tool timeout must bound the call; cancellation and
+        task deadlines are applied as soon as the call returns.
+        """
         task_id = str(uuid4())
         history = [ChatMessage(role="user", content=task)]
         deadline = self._clock() + self._max_task_seconds
@@ -114,10 +119,17 @@ class AgentController:
                     tools=self._registry.llm_tool_definitions(),
                 )
                 response = LLMResponse.model_validate(raw_response)
+                _validate_response_consistency(response)
+            except KeyboardInterrupt:
+                return self._finish(
+                    "cancelled",
+                    task_id,
+                    steps,
+                    calls,
+                    "Vazifa bekor qilindi.",
+                )
             except LLMError as error:
-                self._log_llm_error(task_id, error)
-                message = ApplicationErrorHandler().user_message(error)
-                self._output(f"XATO: {message}")
+                self._report_error(task_id, error, "llm")
                 return AgentTaskResult(
                     status="llm_error",
                     steps=steps + 1,
@@ -128,6 +140,14 @@ class AgentController:
                 self._output("XATO: Modeldan yaroqsiz javob keldi.")
                 return AgentTaskResult(
                     status="invalid_response",
+                    steps=steps + 1,
+                    tool_calls=calls,
+                    task_id=task_id,
+                )
+            except Exception as error:
+                self._report_error(task_id, error, "llm")
+                return AgentTaskResult(
+                    status="llm_error",
                     steps=steps + 1,
                     tool_calls=calls,
                     task_id=task_id,
@@ -208,6 +228,23 @@ class AgentController:
                         execution_duration=0,
                     )
 
+                if cancellation is not None and cancellation.is_set():
+                    return self._finish(
+                        "cancelled",
+                        task_id,
+                        steps,
+                        calls,
+                        "Vazifa bekor qilindi; joriy amal yakunlandi.",
+                    )
+                if self._clock() >= deadline:
+                    return self._finish(
+                        "time_limit",
+                        task_id,
+                        steps,
+                        calls,
+                        "Vazifa uchun vaqt limiti tugadi.",
+                    )
+
                 if tool_result.status == "success":
                     failed_attempts.pop(fingerprint, None)
                 else:
@@ -262,14 +299,20 @@ class AgentController:
             preview = preview[:217] + "..."
         self._output(f"[natija] {preview}")
 
-    def _log_llm_error(self, task_id: str, error: LLMError) -> None:
+    def _report_error(
+        self,
+        task_id: str,
+        error: BaseException,
+        component: str,
+    ) -> None:
+        self._output(f"XATO: {ApplicationErrorHandler().user_message(error)}")
         audit_logger = self._dispatcher.audit_logger
         if audit_logger is None:
             return
         try:
             audit_logger.log_exception(
                 task_id=task_id,
-                component="llm",
+                component=component,
                 error_code=type(error).__name__,
             )
         except Exception:
@@ -309,3 +352,11 @@ def _call_fingerprint(name: str, arguments: dict[str, object]) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_response_consistency(response: LLMResponse) -> None:
+    message = response.assistant_message
+    if message.role != "assistant":
+        raise ValueError("model response assistant message has an invalid role")
+    if message.tool_calls is not None and message.tool_calls != response.tool_calls:
+        raise ValueError("model response tool calls are inconsistent")

@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import stat
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -44,12 +45,15 @@ ExecutionStatus = Literal[
 ]
 
 _SECRET_KEY = re.compile(
-    r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|credential)"
+    r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|credential"
+    r"|private[_-]?key|ssh[_-]?key|access[_-]?key|refresh[_-]?token|bearer)"
 )
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(\b(?:password|passwd|secret|token|api[_-]?key|authorization)\b"
+    r"(?i)(\b(?:password|passwd|secret|token|api[_-]?key|authorization|cookie"
+    r"|credential|private[_-]?key|ssh[_-]?key|access[_-]?key|refresh[_-]?token)\b"
     r"\s*[:=]\s*)([^\r\n,;]+)"
 )
+_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
 _LOCAL_PATH = re.compile(r"(?<![\w:])/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]+")
 _CONTENT_KEYS = {"content", "text", "document", "body", "prompt"}
 _PATH_KEYS = {"path", "folder", "filename", "file", "target"}
@@ -57,6 +61,17 @@ _MAX_VALUE_CHARS = 256
 
 
 class _StrictRotatingFileHandler(RotatingFileHandler):
+    def _open(self):
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.baseFilename, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            return os.fdopen(fd, self.mode, encoding=self.encoding)
+        except Exception:
+            os.close(fd)
+            raise
+
     def handleError(self, record: logging.LogRecord) -> None:
         error = record.exc_info[1] if record.exc_info else None
         if error is not None:
@@ -125,9 +140,9 @@ class AuditLogger:
             )
         finally:
             os.umask(previous_umask)
-        os.chmod(self.path, 0o600)
         handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(handler)
+        self._secure_log_files()
         self._prune_expired()
 
     def log_tool(
@@ -220,9 +235,7 @@ class AuditLogger:
         )
         with self._lock:
             self._logger.info(serialized)
-            for candidate in self._log_files():
-                if candidate.is_file() and not candidate.is_symlink():
-                    os.chmod(candidate, 0o600)
+            self._secure_log_files()
             self._prune_expired()
 
     def _log_files(self) -> list[Path]:
@@ -239,10 +252,31 @@ class AuditLogger:
         threshold = self._clock() - self.retention_days * 86400
         for candidate in self._log_files():
             try:
-                if candidate.is_file() and candidate.stat().st_mtime < threshold:
+                details = candidate.lstat()
+                if stat.S_ISREG(details.st_mode) and details.st_mtime < threshold:
                     candidate.unlink()
             except OSError:
                 continue
+
+    def _secure_log_files(self) -> None:
+        for candidate in self._log_files():
+            try:
+                fd = os.open(
+                    candidate,
+                    os.O_RDONLY
+                    | os.O_CLOEXEC
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                )
+            except OSError:
+                continue
+            try:
+                if stat.S_ISREG(os.fstat(fd).st_mode):
+                    os.fchmod(fd, 0o600)
+            except OSError:
+                continue
+            finally:
+                os.close(fd)
 
 
 def sanitize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -269,6 +303,7 @@ def _sanitize_value(value: Any) -> Any:
         return [_sanitize_value(item) for item in value[:100]]
     if isinstance(value, str):
         safe = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", value)
+        safe = _BEARER_TOKEN.sub("Bearer [REDACTED]", safe)
         safe = _LOCAL_PATH.sub("[PATH OMITTED]", safe)
         if len(safe) > _MAX_VALUE_CHARS:
             return safe[:_MAX_VALUE_CHARS] + "…[TRUNCATED]"

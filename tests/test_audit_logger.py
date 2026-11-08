@@ -133,3 +133,40 @@ def test_existing_symlink_log_path_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="symbolic link"):
         AuditLogger(link)
     assert target.read_text() == "untouched"
+
+
+def test_sanitizer_redacts_bearer_and_credential_values() -> None:
+    sanitized = sanitize_arguments(
+        {
+            "private_key": "private key material",
+            "query": "Bearer abc.def-123",
+            "settings": "cookie=session-value; credential=private-value",
+        }
+    )
+
+    assert sanitized == {
+        "private_key": "[REDACTED]",
+        "query": "Bearer [REDACTED]",
+        "settings": "cookie=[REDACTED]; credential=[REDACTED]",
+    }
+
+
+def test_audit_file_creation_rejects_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    original_open = os.open
+    target = tmp_path / "target.jsonl"
+
+    def swap_then_open(file: object, flags: int, mode: int = 0o777) -> int:
+        if Path(file) == path and not path.exists():
+            path.symlink_to(target)
+        return original_open(file, flags, mode)
+
+    import security.audit_logger as audit_module
+
+    monkeypatch.setattr(audit_module.os, "open", swap_then_open)
+    with pytest.raises(OSError):
+        AuditLogger(path)
+    assert not target.exists()
