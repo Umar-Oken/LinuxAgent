@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from security.audit_logger import AuditLogger, sanitize_arguments
+from security.audit_logger import AuditLogger, sanitize_arguments, sanitize_text
 
 
 def _events(path: Path) -> list[dict[str, object]]:
@@ -92,6 +92,26 @@ def test_sanitizer_redacts_nested_secrets_and_omits_file_content() -> None:
     }
 
 
+def test_sanitizer_omits_all_structured_document_content() -> None:
+    sanitized = sanitize_arguments(
+        {
+            "paragraphs": ["sensitive paragraph"],
+            "tables": [[["sensitive table cell"]]],
+            "headers": ["sensitive header"],
+            "rows": [["sensitive row"]],
+            "sheets": [{"name": "Sheet1", "rows": [["sensitive cell"]]}],
+        }
+    )
+
+    assert all(
+        value.startswith("[CONTENT OMITTED:")
+        for value in sanitized.values()
+        if isinstance(value, str)
+    )
+    serialized = json.dumps(sanitized)
+    assert "sensitive" not in serialized
+
+
 def test_rotation_keeps_active_and_backup_logs_private(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     logger = AuditLogger(path, max_bytes=300, backup_count=2)
@@ -149,6 +169,36 @@ def test_sanitizer_redacts_bearer_and_credential_values() -> None:
         "query": "Bearer [REDACTED]",
         "settings": "cookie=[REDACTED]; credential=[REDACTED]",
     }
+
+
+def test_sanitizer_redacts_secret_query_parameters_in_urls() -> None:
+    sanitized = sanitize_arguments(
+        {"url": "https://example.test/check?key=private-value&lang=en"}
+    )
+    assert "private-value" not in sanitized["url"]
+    assert "key=%5BREDACTED%5D" in sanitized["url"]
+    assert "lang=en" in sanitized["url"]
+    assert sanitize_arguments({"url": "https://[malformed"})["url"]
+
+
+def test_sanitize_text_redacts_source_secrets_and_limits_output() -> None:
+    sanitized = sanitize_text(
+        'password="private" Authorization: Bearer abc123'
+        ' https://example.test/?api_key=hidden /home/user/private.py',
+        max_chars=500,
+    )
+    assert "private" not in sanitized
+    assert "abc123" not in sanitized
+    assert "hidden" not in sanitized
+    assert "/home/user/private.py" not in sanitized
+    assert sanitize_text("x" * 20, max_chars=5).endswith("[TRUNCATED]")
+    pem = sanitize_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-material\n"
+        "-----END OPENSSH PRIVATE KEY-----",
+        max_chars=500,
+    )
+    assert "private-material" not in pem
+    assert "[REDACTED PEM BLOCK]" in pem
 
 
 def test_audit_file_creation_rejects_symlink_swap(

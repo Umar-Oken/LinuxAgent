@@ -76,6 +76,15 @@ class DenyByDefaultPermissionChecker:
         return False
 
 
+class ToolExecutionError(Exception):
+    """Expected, safe tool-operation failure with a stable result code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.safe_message = message
+
+
 class _ToolTimedOut(Exception):
     """Internal marker for a completed synchronous call exceeding its limit."""
 
@@ -284,6 +293,13 @@ class ToolDispatcher:
                 "Tool execution exceeded its time limit.",
                 started,
                 status="timeout",
+            )
+        except ToolExecutionError as exc:
+            return self._error(
+                tool_name,
+                exc.code,
+                exc.safe_message,
+                started,
             )
         except Exception:
             return self._error(

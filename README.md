@@ -54,21 +54,55 @@ Ro'yxat qiymatlari JSON massiv bo'lishi kerak, masalan
 `AGENT_SECURITY_ALLOWED_ROOTS='["/home/user/work"]'`. Environment qiymati YAML
 qiymatidan ustun turadi. Parol, token va boshqa maxfiy qiymatlarni YAML'ga
 qo'shmang; noma'lum maydonlar konfiguratsiya xatosi hisoblanadi.
+`network.connectivity_endpoint` (yoki `AGENT_NETWORK_CONNECTIVITY_ENDPOINT`)
+ulanish tekshiruvi uchun ishonchli HTTPS endpointni belgilaydi; qiymat
+foydalanuvchi konfiguratsiyasidan olinadi va model tomonidan boshqarilmaydi.
+`network.exchange_rate_providers` (`AGENT_NETWORK_EXCHANGE_RATE_PROVIDERS`)
+valyuta kursi API'larining HTTPS endpointlar ro'yxatini,
+`web_timeout_seconds` va `web_max_content_bytes` esa veb-so'rov limitlarini
+belgilaydi. Kurs endpointlari `from` va `to` query parametrlarini qabul qilishi
+va JSON'da `rates` xaritasini (Frankfurter uslubi) yoki
+`conversion_rate`/`conversion_rates` maydonlarini qaytarishi kerak.
 
-`security`, `tools` va agent limitlari hozircha faqat yuklanib tekshiriladi;
-ularni vosita bajarilishida qo'llash keyingi alohida vazifa. Bu bosqichda
-mavjud vositalarning ruxsat va bajarilish mantig'i o'zgarmaydi.
+`security.allowed_roots` fayl vositalari uchun aniq ruxsat etilgan kataloglarni
+belgilaydi. `tools.enabled_categories` registry'da e'lon qilinadigan tool
+kategoriyalarini cheklaydi. Eslatma yozish `CONTROLLED` amal bo'lib, ishonchli
+CLI orqali tasdiqlanishi kerak.
 
 ## Vositalar
 
 | Vosita | Vazifasi |
 |---|---|
-| `find_files` | Yashirin papkalarni chetlab, nom bo'lagi yoki kengaytma bilan 20 tagacha fayl qidiradi. |
-| `read_text` | `.txt` va `.md` fayllarni UTF-8 formatida, 6000 belgigacha o'qiydi. |
-| `save_note` | To'liq matn va yo'lni ko'rsatib, tasdiqdan keyin `~/agent_notes/` ichiga yozadi. |
+| `search_files` | Yashirin papkalarni chetlab, nom bo'lagi yoki kengaytma bilan 20 tagacha fayl qidiradi. |
+| `list_directory` | Ruxsat etilgan katalog tarkibini saralash va sahifalash bilan ko'rsatadi. |
+| `search_files_advanced` | Fayl andozasi, kengaytma, hajm va o'zgartirilgan sana bo'yicha cheklangan rekursiv qidiruv. |
+| `get_file_metadata` | Ruxsat etilgan regular faylning hajmi, vaqti va ruxsat bitlarini qaytaradi. |
+| `find_large_files` | Belgilangan hajmdan katta fayllarni cheklangan rekursiya va pagination bilan qidiradi. |
+| `copy_file` | Tasdiqdan keyin faylni mavjud fayl ustidan yozmasdan nusxalaydi. |
+| `move_file` | Tasdiqdan keyin faylni ruxsat etilgan joyga ko'chiradi, ziddiyatda ustidan yozmaydi. |
+| `rename_file` | Tasdiqdan keyin fayl nomini xavfsiz o'zgartiradi. |
+| `create_directory` | Tasdiqdan keyin ruxsat etilgan root ichida yangi katalog yaratadi. |
+| `organize_directory` | Fayllarni kengaytma qoidalari bilan tartiblash rejasini ko'rsatadi; `apply=true` va preview'dagi `plan_id` bilan tasdiqdan so'ng ko'chiradi. |
+| `find_duplicate_files` | SHA-256 orqali bir xil fayllarni guruhlaydi; hech birini o'chirmaydi. |
+| `create_archive` | Ruxsat etilgan katalogdan cheklangan ZIP arxivini tasdiq bilan yaratadi. |
+| `extract_archive` | ZIP/TAR arxivini traversal, maxsus fayl va decompression-bomb cheklovlari bilan tasdiqdan so'ng ochadi. |
+| `read_text_file` | `.txt` va `.md` fayllarni UTF-8 formatida, 6000 belgigacha o'qiydi. |
+| `create_note` | To'liq matn va yo'lni ko'rsatib, tasdiqdan keyin `~/agent_notes/` ichiga yozadi. |
 | `calculate` | AST ruxsat ro'yxati orqali xavfsiz arifmetik amallarni hisoblaydi. |
-| `system_status` | CPU, mantiqiy yadro, RAM va `/` disk holatini ko'rsatadi. |
+| `get_system_status` | CPU, mantiqiy yadro, RAM va `/` disk holatini ko'rsatadi. |
+| `get_cpu_details` | CPU yuklanishi va mantiqiy/jismoniy yadro sonini ko'rsatadi. |
+| `get_memory_details` | RAM va swap xotirasi ishlatilishini GiB va foizlarda ko'rsatadi. |
+| `get_disk_details` | Ulangan fayl tizimlarining band/bo'sh joyini ko'rsatadi; natijalar limiti 1–100. |
+| `list_processes` | Eng ko'p CPU yoki RAM ishlatayotgan jarayonlarni ko'rsatadi; limit 1–100, environment va buyruq satrini yig'maydi. |
+| `get_network_interfaces` | Interfeys holati va trafik hisoblagichlarini ko'rsatadi; IP va MAC manzillarini yig'maydi. |
+| `check_internet_connectivity` | Faqat sozlangan ishonchli HTTPS endpoint'ga 3 soniyalik timeout bilan bitta HEAD so'rov yuboradi. |
+| `inspect_process` | PID orqali jarayon holati va CPU/xotira/thread sarfini ko'rsatadi; jarayonni o'zgartirmaydi. |
+| `get_system_uptime` | Tizim ishga tushganidan beri o'tgan vaqtni va UTC boot vaqtini ko'rsatadi. |
 | `get_weather` | API kalitisiz Open-Meteo'dan joriy ob-havoni oladi. |
+| `fetch_webpage` | Public HTTP(S) HTML/matnni DNS-pinning, redirect tekshiruvi va hajm limiti bilan yuklab, ko'rinadigan 3000 belgigacha matnni chiqaradi. Sahifa mazmuni ishonchsiz. |
+| `summarize_webpage` | Xavfsiz olingan sahifa matnidan qisqa lokal xulosa tuzadi; sayt ko'rsatmalariga amal qilmaydi. |
+| `get_exchange_rate` | Sozlangan 1–5 ta HTTPS ochiq API provayderidan kurs oladi; muvaffaqiyatsiz providerda keyingisini sinaydi. |
+| `check_website_status` | Public HTTP(S) saytdan cheklangan timeout bilan javob holatini tekshiradi; javob body'sini yuklab olmaydi. |
 
 ## Talablar qanday bajariladi
 

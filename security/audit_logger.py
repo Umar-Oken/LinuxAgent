@@ -15,6 +15,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -54,8 +55,24 @@ _SECRET_ASSIGNMENT = re.compile(
     r"\s*[:=]\s*)([^\r\n,;]+)"
 )
 _BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)[A-Z0-9 ]*-----"
+    r".*?-----END [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)[A-Z0-9 ]*-----",
+    re.IGNORECASE | re.DOTALL,
+)
 _LOCAL_PATH = re.compile(r"(?<![\w:])/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]+")
-_CONTENT_KEYS = {"content", "text", "document", "body", "prompt"}
+_CONTENT_KEYS = {
+    "content",
+    "text",
+    "document",
+    "body",
+    "prompt",
+    "paragraphs",
+    "tables",
+    "headers",
+    "rows",
+    "sheets",
+}
 _PATH_KEYS = {"path", "folder", "filename", "file", "target"}
 _MAX_VALUE_CHARS = 256
 
@@ -296,6 +313,49 @@ def sanitize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _redact_url_query(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    query = []
+    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.casefold().replace("-", "_")
+        sensitive = normalized_key in {
+            "key",
+            "api_key",
+            "apikey",
+            "auth",
+            "authorization",
+            "token",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "password",
+            "signature",
+            "sig",
+        } or normalized_key.endswith(
+            ("_key", "_token", "_secret", "_password", "_signature", "_credential")
+        )
+        query.append((key, "[REDACTED]" if sensitive else item))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
+
+def sanitize_text(value: str, *, max_chars: int = _MAX_VALUE_CHARS) -> str:
+    """Redact secrets and local paths from a bounded source or diff excerpt."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be greater than zero")
+    safe = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", value)
+    safe = _BEARER_TOKEN.sub("******", safe)
+    safe = _PEM_BLOCK.sub("[REDACTED PEM BLOCK]", safe)
+    if safe.startswith(("http://", "https://")):
+        safe = _redact_url_query(safe)
+    safe = _LOCAL_PATH.sub("[PATH OMITTED]", safe)
+    if len(safe) > max_chars:
+        return safe[:max_chars] + "…[TRUNCATED]"
+    return safe
+
+
 def _sanitize_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return sanitize_arguments(dict(value))
@@ -304,6 +364,12 @@ def _sanitize_value(value: Any) -> Any:
     if isinstance(value, str):
         safe = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", value)
         safe = _BEARER_TOKEN.sub("Bearer [REDACTED]", safe)
+        if safe.startswith(("http://", "https://")):
+            safe = _redact_url_query(safe)
+            safe = _LOCAL_PATH.sub("[PATH OMITTED]", safe)
+            if len(safe) > _MAX_VALUE_CHARS:
+                return safe[:_MAX_VALUE_CHARS] + "…[TRUNCATED]"
+            return safe
         safe = _LOCAL_PATH.sub("[PATH OMITTED]", safe)
         if len(safe) > _MAX_VALUE_CHARS:
             return safe[:_MAX_VALUE_CHARS] + "…[TRUNCATED]"

@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 ApprovalPolicy = Literal["writes", "always"]
 ToolCategory = Literal["filesystem", "system", "network", "calculation"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+DEFAULT_CONNECTIVITY_ENDPOINT = "https://connectivitycheck.gstatic.com/generate_204"
+DEFAULT_EXCHANGE_RATE_PROVIDERS = ["https://api.frankfurter.app/latest"]
 
 
 class ConfigurationError(ValueError):
@@ -105,6 +107,62 @@ class ToolSettings(StrictModel):
     enabled_categories: list[ToolCategory] = Field(default_factory=list)
 
 
+class NetworkSettings(StrictModel):
+    connectivity_endpoint: str = DEFAULT_CONNECTIVITY_ENDPOINT
+    exchange_rate_providers: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_EXCHANGE_RATE_PROVIDERS),
+        min_length=1,
+        max_length=5,
+    )
+    web_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    web_max_content_bytes: int = Field(default=1_000_000, ge=1024, le=5_000_000)
+
+    @field_validator("connectivity_endpoint")
+    @classmethod
+    def validate_connectivity_endpoint(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "connectivity_endpoint must be an HTTPS URL without credentials, query, or fragment"
+            )
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("connectivity_endpoint contains an invalid port") from exc
+        return value
+
+    @field_validator("exchange_rate_providers")
+    @classmethod
+    def validate_exchange_rate_providers(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "exchange rate providers must be HTTPS URLs without credentials, query, or fragment"
+                )
+            try:
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("exchange rate provider contains an invalid port") from exc
+            if port not in {None, 443}:
+                raise ValueError("exchange rate providers must use the standard HTTPS port")
+        return values
+
+
 class LoggingSettings(StrictModel):
     level: LogLevel = "INFO"
     retention: int = Field(default=30, ge=1, le=3650)
@@ -115,6 +173,7 @@ class AppSettings(StrictModel):
     agent: AgentSettings = Field(default_factory=AgentSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
+    network: NetworkSettings = Field(default_factory=NetworkSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
 
@@ -185,6 +244,7 @@ def _environment_overrides(data: dict[str, object]) -> None:
         ("agent", AgentSettings),
         ("security", SecuritySettings),
         ("tools", ToolSettings),
+        ("network", NetworkSettings),
         ("logging", LoggingSettings),
     ):
         section_fields = section_model.model_fields

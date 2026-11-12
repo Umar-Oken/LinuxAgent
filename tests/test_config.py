@@ -116,6 +116,61 @@ def test_missing_optional_file_uses_safe_defaults(
     assert settings.security.allowed_roots == []
     assert settings.security.approval_policy == "writes"
     assert settings.tools.enabled_categories == []
+    assert settings.network.connectivity_endpoint == (
+        "https://connectivitycheck.gstatic.com/generate_204"
+    )
+    assert settings.network.exchange_rate_providers == [
+        "https://api.frankfurter.app/latest"
+    ]
+
+
+def test_connectivity_endpoint_can_be_configured_and_requires_https(
+    tmp_path: Path,
+) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "network:\n  connectivity_endpoint: https://status.example.test/check\n",
+        encoding="utf-8",
+    )
+    assert load_config(config_file).network.connectivity_endpoint == (
+        "https://status.example.test/check"
+    )
+
+    config_file.write_text(
+        "network:\n  connectivity_endpoint: http://status.example.test/check\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError):
+        load_config(config_file)
+
+
+def test_exchange_rate_providers_are_configurable_https_endpoints(
+    tmp_path: Path,
+) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+network:
+  exchange_rate_providers:
+    - https://rates.example.test/latest
+  web_timeout_seconds: 4
+  web_max_content_bytes: 4096
+""",
+        encoding="utf-8",
+    )
+    settings = load_config(config_file)
+    assert settings.network.exchange_rate_providers == [
+        "https://rates.example.test/latest"
+    ]
+    assert settings.network.web_timeout_seconds == 4
+    assert settings.network.web_max_content_bytes == 4096
+
+    config_file.write_text(
+        "network:\n  exchange_rate_providers: [http://rates.example.test/latest]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError):
+        load_config(config_file)
 
 
 @pytest.mark.parametrize("unsafe_path", ["relative/path", "../outside", "/"])
