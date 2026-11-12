@@ -50,6 +50,7 @@ from core.llm_client import (
     LLMClient,
     OllamaClient,
 )
+from core.memory import MemoryRecorder, MemoryStorageError, PersistentMemory
 from core.tool_dispatcher import (
     ToolDispatcher,
     ToolExecutionError,
@@ -3019,7 +3020,9 @@ def run_task(
     max_steps: int = MAX_STEPS,
     max_tool_calls: int = 8,
     max_action_retries: int = 1,
+    max_replans: int = 2,
     max_task_seconds: float = 300,
+    memory: MemoryRecorder | None = None,
 ) -> AgentTaskResult:
     """Compatibility entry point delegated to the bounded core controller."""
     controller = AgentController(
@@ -3031,7 +3034,9 @@ def run_task(
         max_steps=max_steps,
         max_tool_calls=max_tool_calls,
         max_action_retries=max_action_retries,
+        max_replans=max_replans,
         max_task_seconds=max_task_seconds,
+        memory=memory,
     )
     return controller.run_task(task)
 
@@ -3043,6 +3048,17 @@ def main() -> None:
     except ConfigurationError as exc:
         print(f"XATO: {ApplicationErrorHandler().user_message(exc)}")
         return
+
+    memory: PersistentMemory | None = None
+    if settings.database.is_configured:
+        try:
+            memory = PersistentMemory(
+                settings.database,
+                retention_days=settings.database.memory_retention_days,
+            )
+        except MemoryStorageError:
+            print("XATO: PostgreSQL xotira bazasini tayyorlab bo'lmadi.")
+            return
 
     try:
         audit_logger = AuditLogger(retention_days=settings.logging.retention)
@@ -3109,7 +3125,9 @@ def main() -> None:
                         max_steps=settings.agent.max_steps,
                         max_tool_calls=settings.agent.max_tool_calls,
                         max_action_retries=settings.agent.max_action_retries,
+                        max_replans=settings.agent.max_replans,
                         max_task_seconds=settings.agent.max_task_seconds,
+                        memory=memory,
                     )
         except KeyboardInterrupt:
             print("\nXayr!")

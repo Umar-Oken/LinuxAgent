@@ -16,9 +16,13 @@ from core.config import (
 
 
 @pytest.fixture(autouse=True)
-def clear_agent_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def clear_agent_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     for variable in tuple(os.environ):
-        if variable.startswith("AGENT_"):
+        if variable.startswith(("AGENT_", "DB_")):
             monkeypatch.delenv(variable)
 
 
@@ -33,6 +37,7 @@ agent:
   max_steps: 12
   max_tool_calls: 9
   max_retries: 1
+  max_replans: 3
 security:
   allowed_roots:
     - /tmp/agent-work
@@ -54,6 +59,7 @@ logging:
     assert settings.ollama.model == "gemma4:e2b-it-qat"
     assert settings.ollama.host == "http://127.0.0.1:11434"
     assert settings.agent.max_steps == 12
+    assert settings.agent.max_replans == 3
     assert settings.security.allowed_roots == [Path("/tmp/agent-work")]
     assert settings.tools.enabled_categories == ["filesystem", "calculation"]
     assert settings.logging.level == "DEBUG"
@@ -122,6 +128,51 @@ def test_missing_optional_file_uses_safe_defaults(
     assert settings.network.exchange_rate_providers == [
         "https://api.frankfurter.app/latest"
     ]
+    assert not settings.database.is_configured
+
+
+def test_loads_postgres_settings_from_dotenv_and_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DB_NAME=agent_db\n"
+        "DB_USER=agent_user\n"
+        "DB_PASSWORD=dotenv-secret\n"
+        "DB_HOST=db.internal\n"
+        "DB_PORT=5432\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DB_PASSWORD", "environment-secret")
+
+    settings = load_config(tmp_path / "config.yaml")
+
+    assert settings.database.name == "agent_db"
+    assert settings.database.user == "agent_user"
+    assert settings.database.password is not None
+    assert settings.database.password.get_secret_value() == "environment-secret"
+    assert "environment-secret" not in repr(settings.database)
+    assert settings.database.host == "db.internal"
+    assert settings.database.port == 5432
+    assert settings.database.is_configured
+
+
+def test_rejects_partial_postgres_configuration_without_exposing_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DB_NAME=agent_db\nDB_PASSWORD=secret-that-must-not-leak\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigurationError) as error:
+        load_config(tmp_path / "config.yaml")
+
+    assert "database" in str(error.value)
+    assert "secret-that-must-not-leak" not in str(error.value)
 
 
 def test_connectivity_endpoint_can_be_configured_and_requires_https(

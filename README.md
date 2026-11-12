@@ -33,6 +33,7 @@ agent:
   max_steps: 8
   max_tool_calls: 8
   max_retries: 2
+  max_replans: 2
 security:
   allowed_roots: []
   protected_paths:
@@ -63,6 +64,41 @@ valyuta kursi API'larining HTTPS endpointlar ro'yxatini,
 belgilaydi. Kurs endpointlari `from` va `to` query parametrlarini qabul qilishi
 va JSON'da `rates` xaritasini (Frankfurter uslubi) yoki
 `conversion_rate`/`conversion_rates` maydonlarini qaytarishi kerak.
+
+### PostgreSQL (ixtiyoriy)
+
+Loyiha ildizida `cp .env.example .env` buyrug'ini bajaring va `.env` faylida
+`DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT` qiymatlarini kiriting.
+`.env` Git'ga kiritilmaydi. Ulanish parametrlarini dastur `load_config()` orqali
+oladi; barcha beshta qiymat berilmaguncha PostgreSQL ulanishi faollashmaydi.
+`storage.postgres.connect_database(settings.database)` ulanishni ochadi:
+
+```python
+from core.config import load_config
+from storage.postgres import connect_database
+
+settings = load_config()
+with connect_database(settings.database) as connection:
+    row = connection.execute("SELECT 1").fetchone()
+    print(row)
+```
+
+Database sozlanganda agent ishga tushishida `storage/database.py` migratsiyalarni
+qo'llaydi, `core/memory.py` esa suhbatlarni, vazifa natijalarini va faqat
+tool'larning xavfsiz xulosa metama'lumotlarini saqlaydi. Sukutdagi saqlash
+muddati 30 kun; `database.memory_retention_days` orqali 1–3650 kun qilib
+sozlanadi. Agentga maxsus, superuser bo'lmagan PostgreSQL role va alohida
+database ajrating; migratsiyalar `agent_memory` sxemasini yaratadi va `PUBLIC`
+uchun schema ruxsatlarini olib tashlaydi.
+
+Shaxsiy afzallik yoki eslatmani doimiy saqlash
+`PersistentMemory.save_persistent_note` API orqali faqat
+`TrustedApprovalInterface` ga ulangan `ApprovalManager` tasdiqlagandan keyin
+mumkin. Tasdiq so'rovida aynan saqlanadigan matn ko'rsatiladi; rad etilsa yoki
+ishonchli interfeys bo'lmasa, eslatma saqlanmaydi.
+`recent_conversations()`, `search_task_history()`, `delete_conversation()`,
+`delete_note()` va `delete_all_memory()` API'lari ma'lumotlarni o'qish va
+o'chirish imkonini beradi. Vector embedding saqlanmaydi.
 
 `security.allowed_roots` fayl vositalari uchun aniq ruxsat etilgan kataloglarni
 belgilaydi. `tools.enabled_categories` registry'da e'lon qilinadigan tool
@@ -106,9 +142,39 @@ CLI orqali tasdiqlanishi kerak.
 
 ## Talablar qanday bajariladi
 
-Agent `core/llm_client.py` adapteri orqali Ollama bilan muloqot qiladi. Model native tool calling'ni e'lon qilgan bo'lsa, shu format ishlatiladi; aks holda sxema bilan cheklangan JSON javobi qo'llanadi. Vosita argumentlari bajarilishidan oldin JSON Schema bo'yicha tekshiriladi. Vaqtinchalik ulanish xatolari konfiguratsiyadagi retry chegarasigacha qayta uriniladi; boshqa model yoki transport xatolari alohida ko'rsatiladi. Bajarilgan vosita natijalari suhbat tarixiga qaytariladi. Har bir qadam va qisqa natija terminalda ko'rinadi; bitta vazifada ko'pi bilan 8 vosita chaqiruvi bajariladi. Har qanday fayl yozishdan oldin foydalanuvchi `ha` deb tasdiqlashi kerak. Hisoblash faqat AST ruxsat ro'yxatidagi amallar orqali bajariladi.
+Agent `core/llm_client.py` adapteri orqali Ollama bilan muloqot qiladi. Model native tool calling'ni e'lon qilgan bo'lsa, shu format ishlatiladi; aks holda sxema bilan cheklangan JSON javobi qo'llanadi. `core/planner.py` tanlangan tool chaqiruvlarini ro'yxatdagi kategoriyalar va ketma-ket bog'liqliklar bilan strukturaviy rejaga aylantiradi. Reja ruxsat bermaydi: har bir chaqiruv avvalgidek dispatcher, policy va kerakli trusted approval'dan o'tadi. Bosqichlar va tool chaqiruvlari agent limitlari bilan, xatodan keyingi qayta rejalashtirish `agent.max_replans` bilan cheklanadi. Vosita argumentlari bajarilishidan oldin JSON Schema bo'yicha tekshiriladi. Vaqtinchalik ulanish xatolari konfiguratsiyadagi retry chegarasigacha qayta uriniladi; boshqa model yoki transport хatолари алоҳида кўрсатилади. Bajarilgan vosita natijalari suhbat tarixiga qaytariladi. Har bir qadam va qisqa natija terminalda ko'rinadi; bitta vazifada ko'pi bilan 8 vosita chaqiruvi bajariladi. Har qanday fayl yozishdan oldin foydalanuvchi `ha` deb tasdiqlashi kerak. Hisoblash faqat AST ruxsat ro'yxatidagi amallar orqali bajariladi.
+
+## Qayta foydalaniladigan workflow'lar
+
+`core.workflow_engine.WorkflowEngine` workflow'ni Pydantic va JSON Schema bilan
+tekshirilgan deklarativ ta'rif sifatida ro'yxatdan o'tkazadi. Bosqich faqat
+registry'dagi tool nomiga, literal qiymatga, workflow input'iga yoki oldingi
+strukturaviy tool natijasining aniq yo'liga murojaat qilishi mumkin; Python va
+shell ifodalari yo'q. `preview()` tool chaqirmasdan reja beradi, `run()` esa
+bosqichlarni ketma-ket `ToolDispatcher` orqali bajaradi. Shu sababli workflow
+hech qanday yangi ruxsat bermaydi. `history()` faqat run metama'lumotlari va
+bosqich holatlarini saqlaydi, argument yoki tool natijalarini emas.
+
+`register_sample_workflows(engine)` quyidagi xavfsiz namunalarni qo'shadi:
+`organize_downloads_preview`, `daily_system_report` va `summarize_documents`.
+`list_workflows()` ro'yxatdan o'tgan deklaratsiyalarning mustaqil nusxalarini
+qaytaradi. `threading.Event` ni `run(..., cancellation=event)` ga uzatib,
+navbatdagi bosqichlar va cooperative async tool bajarilishini bekor qilish mumkin.
 
 ## Demo
+
+Kontekstni boshqarish `core/context_manager.py` da: suhbat tarixini taxminiy
+token limiti bilan qisqartiradi, tool natijalarini LLM'ga yuborishdan oldin
+chegaralaydi va ularni ishonchsiz kontent sifatida belgilaydi. Faol vazifa,
+permission qarorlari va bajarilish limitlari model yaratgan xulosalardan
+tashqarida saqlanadi; ishonchli system prompt alohida uzatiladi.
+
+Tool natijalari `core/result_validator.py` orqali tekshiriladi: fayl va arxiv
+amallari haqiqiy filesystem holati bilan solishtiriladi, strukturaviy hujjat
+javoblari tekshiriladi. Noaniq yoki qisman bajarilgan o'zgartirishlar ko'r-ko'rona
+qayta bajarilmaydi; cheklangan retry faqat ma'lum vaqtinchalik xatolardagi
+`READ_ONLY` toollar uchun qo'llanadi. Idempotency kalitlari agent jarayoni
+ichida ayni task, tool va argumentlar takrorlanishini to'sadi.
 
 Quyidagi terminal chiqishini shu yerga joylashtiring:
 

@@ -11,10 +11,10 @@ from core.llm_client import (
     LLMResponse,
     ModelCapabilities,
     ToolCall,
-    ToolDefinition as LLMToolDefinition,
 )
-from core.tool_dispatcher import ToolDispatcher
-from core.tool_registry import ToolDefinition, ToolRegistry, ToolRegistryError
+from core.llm_client import ToolDefinition as LLMToolDefinition
+from core.tool_dispatcher import ToolDispatcher, ToolResult
+from core.tool_registry import ToolDefinition, ToolRegistry
 from security.approval import (
     ApprovalManager,
     ApprovalRequest,
@@ -74,6 +74,48 @@ class ApproveInterface(TrustedApprovalInterface):
         return ApprovalResponse(approval_id=request.approval_id, decision="approve")
 
 
+class _RecordingMemory:
+    def __init__(self) -> None:
+        self.started: tuple[str, str] | None = None
+        self.tools: list[dict[str, object]] = []
+        self.finished: dict[str, object] | None = None
+
+    def start_task(self, task_id: str, user_message: str) -> None:
+        self.started = (task_id, user_message)
+
+    def record_tool_execution(
+        self,
+        task_id: str,
+        *,
+        tool_name: str,
+        status: str,
+        error_code: str | None,
+        duration_seconds: float,
+    ) -> None:
+        self.tools.append(
+            {
+                "task_id": task_id,
+                "tool_name": tool_name,
+                "status": status,
+                "error_code": error_code,
+                "duration_seconds": duration_seconds,
+            }
+        )
+
+    def finish_task(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        response: str | None,
+    ) -> None:
+        self.finished = {
+            "task_id": task_id,
+            "status": status,
+            "response": response,
+        }
+
+
 def _response_for_tool(name: str, value: str) -> LLMResponse:
     call = ToolCall(name=name, arguments={"value": value})
     return LLMResponse(
@@ -103,6 +145,8 @@ def _setup(
     max_steps: int = 8,
     max_tool_calls: int = 8,
     max_action_retries: int = 1,
+    max_replans: int = 2,
+    memory: _RecordingMemory | None = None,
 ) -> tuple[AgentController, FakeLLMClient, list[str], PathGuard]:
     called: list[str] = []
     registry = ToolRegistry()
@@ -133,6 +177,8 @@ def _setup(
         max_steps=max_steps,
         max_tool_calls=max_tool_calls,
         max_action_retries=max_action_retries,
+        max_replans=max_replans,
+        memory=memory,
         output=lambda _text: None,
     )
     return controller, client, called, guard
@@ -150,12 +196,36 @@ def test_controller_executes_single_tool_then_returns_final_answer(tmp_path: Pat
         assert result.steps == 2
         assert result.tool_calls == 1
         assert called == ["one"]
+        assert controller.last_plan is not None
+        assert [step.status for step in controller.last_plan.steps] == ["completed"]
         history = client.calls[1]["history"]
         assert history[-1].role == "tool"
         assert "echo:one" in history[-1].content
         assert "UNTRUSTED TOOL DATA" in history[-1].content
     finally:
         guard.close()
+
+
+def test_controller_persists_task_conversation_and_tool_summary(tmp_path: Path) -> None:
+    memory = _RecordingMemory()
+    controller, _client, _called, guard = _setup(
+        tmp_path,
+        [_response_for_tool("mock_echo", "one"), _final("Javob")],
+        memory=memory,
+    )
+    try:
+        result = controller.run_task("echo one")
+    finally:
+        guard.close()
+
+    assert memory.started == (result.task_id, "echo one")
+    assert memory.tools[0]["tool_name"] == "mock_echo"
+    assert memory.tools[0]["status"] == "success"
+    assert memory.finished == {
+        "task_id": result.task_id,
+        "status": "completed",
+        "response": "Javob",
+    }
 
 
 def test_controller_handles_sequential_tool_calls(tmp_path: Path) -> None:
@@ -174,6 +244,133 @@ def test_controller_handles_sequential_tool_calls(tmp_path: Path) -> None:
         assert called == ["one", "two"]
     finally:
         guard.close()
+
+
+def test_controller_plan_marks_failed_step_and_blocks_dependent_call(
+    tmp_path: Path,
+) -> None:
+    called: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="mock_echo",
+            description="Echo a value.",
+            category="system",
+            argument_schema=EchoArguments.model_json_schema(),
+            argument_model=EchoArguments,
+            permission_level="READ_ONLY",
+            execution_timeout=1,
+            implementation=lambda value: called.append(value) or value,
+        )
+    )
+    first = ToolCall(name="mock_echo", arguments={"value": "first"})
+    second = ToolCall(name="mock_echo", arguments={"value": "second"})
+    response = LLMResponse(
+        content="",
+        tool_calls=[first, second],
+        assistant_message=ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[first, second],
+        ),
+    )
+    client = FakeLLMClient([response, _final()])
+    guard = PathGuard([tmp_path])
+    controller = AgentController(
+        client=client,
+        registry=registry,
+        dispatcher=ToolDispatcher(registry, permission_checker=DenyPermission()),
+        path_guard=guard,
+        system_prompt="test",
+        output=lambda _text: None,
+    )
+    try:
+        result = controller.run_task("Run two steps")
+    finally:
+        guard.close()
+
+    assert result.status == "completed"
+    assert called == []
+    assert controller.last_plan is not None
+    assert [step.status for step in controller.last_plan.steps] == [
+        "failed",
+        "blocked",
+    ]
+    assert "DEPENDENCY_FAILED" in client.calls[1]["history"][-1].content
+
+
+def test_controller_replans_once_after_tool_failure(tmp_path: Path) -> None:
+    controller, _client, called, guard = _setup(
+        tmp_path,
+        [
+            _response_for_tool("mock_echo", "first"),
+            _response_for_tool("mock_echo", "second"),
+            _final(),
+        ],
+        permission=DenyPermission(),
+        max_replans=1,
+    )
+    try:
+        result = controller.run_task("Try alternate step")
+    finally:
+        guard.close()
+
+    assert result.status == "completed"
+    assert called == []
+    assert controller.last_plan is not None
+    assert controller.last_plan.replan_count == 1
+
+
+def test_controller_stops_when_replanning_budget_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    controller, client, called, guard = _setup(
+        tmp_path,
+        [
+            _response_for_tool("mock_echo", "first"),
+            _response_for_tool("mock_echo", "second"),
+            _response_for_tool("mock_echo", "third"),
+        ],
+        permission=DenyPermission(),
+        max_replans=1,
+    )
+    try:
+        result = controller.run_task("Keep trying")
+    finally:
+        guard.close()
+
+    assert result.status == "retry_limit"
+    assert len(client.calls) == 3
+    assert called == []
+
+
+def test_controller_enforces_plan_step_budget(tmp_path: Path) -> None:
+    first = ToolCall(name="mock_echo", arguments={"value": "first"})
+    second = ToolCall(name="mock_echo", arguments={"value": "second"})
+    response = LLMResponse(
+        content="",
+        tool_calls=[first, second],
+        assistant_message=ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[first, second],
+        ),
+    )
+    controller, client, called, guard = _setup(
+        tmp_path,
+        [response],
+        max_steps=1,
+        max_tool_calls=4,
+    )
+    try:
+        result = controller.run_task("Two steps")
+    finally:
+        guard.close()
+
+    assert result.status == "step_limit"
+    assert result.tool_calls == 0
+    assert called == []
+    assert len(client.calls) == 1
 
 
 def test_controller_uses_trusted_approval_before_controlled_tool(tmp_path: Path) -> None:
@@ -285,6 +482,39 @@ def test_repeated_failed_operation_is_limited_by_action_retry_budget(
         result = controller.run_task("repeat denied operation")
         assert result.status == "retry_limit"
         assert len(client.calls) == 2
+        assert called == []
+    finally:
+        guard.close()
+
+
+def test_controller_does_not_repeat_uncertain_controlled_action(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    call = _response_for_tool("mock_echo", "same")
+    controller, _client, called, guard = _setup(
+        tmp_path,
+        [call, call, _final()],
+        permission_level="CONTROLLED",
+    )
+    dispatch_count = 0
+
+    async def timeout_dispatch(*_args: object, **_kwargs: object) -> ToolResult:
+        nonlocal dispatch_count
+        dispatch_count += 1
+        return ToolResult(
+            tool_name="mock_echo",
+            status="timeout",
+            error_code="TIMEOUT",
+            safe_error_message="Vaqt tugadi.",
+            execution_duration=1,
+        )
+
+    monkeypatch.setattr(controller._dispatcher, "dispatch", timeout_dispatch)
+    try:
+        result = controller.run_task("Run a controlled action")
+        assert result.status == "completed"
+        assert dispatch_count == 1
         assert called == []
     finally:
         guard.close()

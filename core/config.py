@@ -9,7 +9,16 @@ from typing import Literal, get_origin
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from dotenv import dotenv_values
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 ApprovalPolicy = Literal["writes", "always"]
 ToolCategory = Literal["filesystem", "system", "network", "calculation"]
@@ -66,6 +75,7 @@ class AgentSettings(StrictModel):
     max_tool_calls: int = Field(default=8, ge=1, le=100)
     max_retries: int = Field(default=2, ge=0, le=10)
     max_action_retries: int = Field(default=1, ge=0, le=10)
+    max_replans: int = Field(default=2, ge=0, le=10)
     max_task_seconds: float = Field(default=300.0, gt=0, le=86_400)
 
 
@@ -168,6 +178,28 @@ class LoggingSettings(StrictModel):
     retention: int = Field(default=30, ge=1, le=3650)
 
 
+class DatabaseSettings(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=63)
+    user: str | None = Field(default=None, min_length=1, max_length=63)
+    password: SecretStr | None = Field(default=None, min_length=1)
+    host: str | None = Field(default=None, min_length=1, max_length=253)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    memory_retention_days: int = Field(default=30, ge=1, le=3650)
+
+    @model_validator(mode="after")
+    def require_all_connection_fields(self) -> DatabaseSettings:
+        values = (self.name, self.user, self.password, self.host, self.port)
+        if any(value is not None for value in values) and any(
+            value is None for value in values
+        ):
+            raise ValueError("all database connection fields must be configured together")
+        return self
+
+    @property
+    def is_configured(self) -> bool:
+        return self.name is not None
+
+
 class AppSettings(StrictModel):
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
@@ -175,6 +207,7 @@ class AppSettings(StrictModel):
     tools: ToolSettings = Field(default_factory=ToolSettings)
     network: NetworkSettings = Field(default_factory=NetworkSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
 
 def get_config_dir() -> Path:
@@ -275,10 +308,33 @@ def _environment_overrides(data: dict[str, object]) -> None:
             section[field_name] = value
 
 
+def _database_environment_overrides(data: dict[str, object]) -> None:
+    dotenv_path = Path.cwd() / ".env"
+    values = dotenv_values(dotenv_path=dotenv_path, encoding="utf-8")
+    database = data.get("database")
+    if database is None:
+        database = {}
+        data["database"] = database
+    if not isinstance(database, dict):
+        raise ConfigurationError("Configuration section 'database' must be a YAML mapping.")
+    env_fields = {
+        "DB_NAME": "name",
+        "DB_USER": "user",
+        "DB_PASSWORD": "password",
+        "DB_HOST": "host",
+        "DB_PORT": "port",
+    }
+    for variable, field_name in env_fields.items():
+        value = os.environ.get(variable, values.get(variable))
+        if value is not None:
+            database[field_name] = value
+
+
 def load_config(config_path: str | Path | None = None) -> AppSettings:
-    """Load defaults, optional YAML, and ``AGENT_<SECTION>_<FIELD>`` overrides."""
+    """Load defaults, YAML, dotenv database settings, and environment overrides."""
     path = Path(config_path).expanduser() if config_path is not None else get_config_path()
     data = _load_yaml(path)
+    _database_environment_overrides(data)
     _environment_overrides(data)
     try:
         return AppSettings.model_validate(data)
