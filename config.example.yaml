@@ -1,0 +1,23 @@
+ollama:
+  host: http://127.0.0.1:11434
+  model: gemma4:e2b-it-qat
+  timeout: 60
+agent:
+  max_steps: 8
+  max_tool_calls: 8
+  max_retries: 2
+  max_action_retries: 1
+  max_replans: 2
+  max_task_seconds: 300
+security:
+  # Faqat agent ishlashi kerak bo'lgan aniq kataloglarni qo'shing.
+  allowed_roots: []
+  protected_paths:
+    - ~/.ssh
+    - ~/.gnupg
+  approval_policy: writes
+tools:
+  enabled_categories: []
+logging:
+  level: INFO
+  retention: 30
