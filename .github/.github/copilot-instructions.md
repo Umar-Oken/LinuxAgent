@@ -1,1 +1,0 @@
-Javob tili: faqat o'zbek tili, lotin yozuvi (uz-Latn). Mo'g'ul, rus yoki kirill yozuvidan foydalanma. Kod, buyruqlar va texnik atamalar o'z holicha qolsin. Kod izohlari o'zbek tilida bo'lsin.

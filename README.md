@@ -7,50 +7,10 @@ Ubuntu'da Python 3.10+ va [Ollama](https://ollama.com/) o'rnating, keyin:
 ```bash
 ollama pull gemma4:e2b-it-qat
 python3 -m pip install -r requirements.txt
-python3 -m pip install -e .
-agent chat
+python3 agent.py
 ```
 
 Ollama xizmatini alohida terminalda `ollama serve` bilan ishga tushiring (agar u avtomatik ishlamayotgan bo'lsa). Agent bilan `Siz: ` so'rov satrida gaplashing; `exit`, `quit`, `chiqish`, Ctrl+C yoki Ctrl+D bilan chiqing.
-
-CLI buyruqlari: `agent chat`, `agent tools list`, `agent config show`,
-`agent history` va `agent doctor`. Rich interfeysi joriy vazifa, tool,
-bajarilish holati, approval so'rovlari, natijalar va yakuniy holatni chiqaradi.
-
-### CLI tezkor ma'lumotnomasi
-
-```bash
-agent tools list          # yoqilgan registry toollari va ruxsat darajasi
-agent config show         # tekshirilgan samarali konfiguratsiya (sirlar maskalanadi)
-agent doctor              # Ollama ulanishi va tool-calling qobiliyati
-agent history --limit 20  # redakt qilingan lokal audit hodisalari
-agent chat                # interaktiv terminal sessiyasi
-```
-
-`chat` ichida Ctrl+C joriy so'rovni tartibli bekor qiladi; approval dialogida
-Ctrl+C `bekor` qarorini beradi. Bajarilayotgan model yoki tool chaqiruvi Python
-tomonidan majburan to'xtatilmaydi, biroq uning timeout'i tugashi bilan bekor
-qilish qayd etiladi. Audit tarixi XDG data katalogida faqat lokal metadata
-sifatida saqlanadi; raw tool natijalari jurnalga yozilmaydi.
-
-### Ollama va model tanlash
-
-Ollama server manzili faqat lokal yoki foydalanuvchi belgilagan HTTP(S) host
-bo'lishi mumkin. Standart model `gemma4:e2b-it-qat`; uni avval yuklab, so'ng
-qobiliyatini tekshiring:
-
-```bash
-ollama pull gemma4:e2b-it-qat
-ollama serve
-agent doctor
-```
-
-Boshqa modeldan foydalanish uchun `config.example.yaml` ni konfiguratsiya
-katalogiga nusxalang va `ollama.model` qiymatini model nomiga o'zgartiring.
-Bir marta ishlatish uchun `AGENT_OLLAMA_MODEL='model:tag' agent doctor` deb
-bering. Model native tool calling yoki strukturalangan JSON javobini qo'llashi
-kerak; `doctor` bu qobiliyatni tekshiradi. `ollama.timeout` bitta model so'rovi
-uchun soniyadagi limit, `agent.max_task_seconds` esa butun vazifa limiti.
 
 ## Konfiguratsiya
 
@@ -74,8 +34,6 @@ agent:
   max_tool_calls: 8
   max_retries: 2
   max_replans: 2
-  max_action_retries: 1
-  max_task_seconds: 300
 security:
   allowed_roots: []
   protected_paths:
@@ -84,12 +42,6 @@ security:
   approval_policy: writes
 tools:
   enabled_categories: []
-network:
-  connectivity_endpoint: https://connectivitycheck.gstatic.com/generate_204
-  exchange_rate_providers:
-    - https://api.frankfurter.app/latest
-  web_timeout_seconds: 10
-  web_max_content_bytes: 1000000
 logging:
   level: INFO
   retention: 30
