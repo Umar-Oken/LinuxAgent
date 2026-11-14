@@ -3137,4 +3137,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Legacy `python agent.py` invocations use the installed CLI presentation.
+    # Tool and controller APIs above remain available to importing code.
+    from cli import app
+
+    app(["chat"])

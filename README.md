@@ -11,7 +11,9 @@ python3 -m pip install -e .
 agent chat
 ```
 
-Ollama xizmatini alohida terminalda `ollama serve` bilan ishga tushiring (agar u avtomatik ishlamayotgan bo'lsa). Agent bilan `Siz: ` so'rov satrida gaplashing; `exit`, `quit`, `chiqish`, Ctrl+C yoki Ctrl+D bilan chiqing.
+Eski odat uchun `python3 agent.py` ham ayni zamonaviy chat interfeysini ochadi.
+
+Ollama xizmatini alohida terminalda `ollama serve` bilan ishga tushiring (agar u avtomatik ishlamayotgan bo'lsa). Agent bilan `❯` promptida gaplashing; `exit`, `quit`, `chiqish`, `/exit`, Ctrl+C yoki Ctrl+D bilan chiqing.
 
 CLI buyruqlari: `agent chat`, `agent tools list`, `agent config show`,
 `agent history` va `agent doctor`. Rich interfeysi joriy vazifa, tool,
@@ -32,6 +34,32 @@ Ctrl+C `bekor` qarorini beradi. Bajarilayotgan model yoki tool chaqiruvi Python
 tomonidan majburan to'xtatilmaydi, biroq uning timeout'i tugashi bilan bekor
 qilish qayd etiladi. Audit tarixi XDG data katalogida faqat lokal metadata
 sifatida saqlanadi; raw tool natijalari jurnalga yozilmaydi.
+
+### Terminal UI
+
+`agent chat` Rich panellari bilan banner, joriy vazifa, vositalar, Markdown
+yakuniy javob va model/mavzu/xabar/vaqt statusini ko'rsatadi. Interaktiv
+terminalda `prompt_toolkit` ko'p qatorli kirish, sessiya tarixi hamda
+slash-buyruqlarga tab-completion beradi; matnni **Esc+Enter** yoki
+**Ctrl+Enter** bilan yuboring.
+
+| Buyruq | Vazifa |
+|---|---|
+| `/help` | Tezkor yordam |
+| `/tools` | Barcha vositalar, tavsif va yoqilgan holati |
+| `/tools <nom>` | Vosita tafsilotlari va misol chaqiruvi |
+| `/tools on <nom>` / `/tools off <nom>` | Vosita ishlashini yoqish/o'chirish |
+| `/model` yoki `/model <nom>` | ↑/↓ bilan Ollama modelini tanlash |
+| `/theme [dark\|light\|ocean\|hacker]` | Mavzuni almashtirish |
+| `/history` | Joriy suhbat xabarlarini ko'rsatish |
+| `/save [fayl]` | Suhbatni Markdown faylga saqlash |
+| `/clear` | Ekranni tozalash |
+| `/exit` | Chatdan chiqish |
+
+Kichik terminal oynasida interfeys avtomatik ixcham ko'rinishga o'tadi.
+`NO_COLOR=1 agent chat` ranglarni o'chirib, oddiy matnli chiqishga qaytadi.
+Suhbat fayllari `$XDG_DATA_HOME/personal-ai-agent/conversations/` ichida
+(odatda `~/.local/share/personal-ai-agent/conversations/`) saqlanadi.
 
 ### Ollama va model tanlash
 

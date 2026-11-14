@@ -3,49 +3,46 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Callable
 
+import ollama
 import typer
 from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Prompt
-from rich.text import Text
 from rich.table import Table
 
 from agent import SYSTEM_PROMPT, create_tool_registry
 from core.agent_controller import AgentController
 from core.config import ConfigurationError, get_data_dir, load_config
 from core.llm_client import OllamaClient
+from core.tool_registry import ToolRegistry
 from core.tool_dispatcher import ToolDispatcher
 from security.approval import ApprovalRequest, ApprovalResponse, TrustedApprovalInterface
 from security.approval import ApprovalManager
 from security.audit_logger import AuditLogger
 from security.path_guard import PathAccessError, PathGuard
 from security.permissions import PermissionEngine, PermissionPolicy
+from ui import TerminalUI
 
 app = typer.Typer(help="Xavfsiz terminal AI agenti.", no_args_is_help=True)
 tools_app = typer.Typer(help="Ro'yxatdan o'tgan tool'lar.", no_args_is_help=True)
 config_app = typer.Typer(help="Konfiguratsiya buyruqlari.", no_args_is_help=True)
 app.add_typer(tools_app, name="tools")
 app.add_typer(config_app, name="config")
-console = Console()
+console = Console(no_color=bool(os.environ.get("NO_COLOR")))
 
 
 class _RichApproval(TrustedApprovalInterface):
+    def __init__(self, terminal: TerminalUI | None = None) -> None:
+        self._terminal = terminal or TerminalUI(console)
+
     def request_approval(self, request: ApprovalRequest) -> ApprovalResponse:
-        details = (
-            f"[bold]Amal:[/] {request.action}\n"
-            f"[bold]Maqsad:[/] {request.target_resource}\n"
-            f"[bold]Ta'sir:[/] {request.potential_impact}"
+        answer = self._terminal.approval(
+            request.action, request.target_resource, request.potential_impact
         )
-        console.print(Panel(details, title="[yellow]Tasdiqlash so'rovi[/]", border_style="yellow"))
-        try:
-            answer = Prompt.ask("Tasdiqlaysizmi", choices=["ha", "yoq", "bekor"], default="yoq")
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[yellow]Tasdiqlash bekor qilindi.[/]")
-            answer = "bekor"
         return ApprovalResponse(
             approval_id=request.approval_id,
             decision={"ha": "approve", "bekor": "cancel"}.get(answer, "deny"),
@@ -53,20 +50,11 @@ class _RichApproval(TrustedApprovalInterface):
 
 
 def _agent_output(message: str) -> None:
-    """Render controller events without treating controller text as Rich markup."""
-    if message.startswith("[reja] "):
-        console.print(Panel(Text(message[7:]), title="[cyan]Bajarilish rejasi[/]", border_style="cyan"))
-    elif message.startswith("[step] Vosita: "):
-        console.print(Panel(Text(message[15:]), title="[blue]Tanlangan tool[/]", border_style="blue"))
-    elif message.startswith("[natija] "):
-        console.print(Panel(Text(message[9:]), title="[green]Tool natijasi[/]", border_style="green"))
-    elif message.startswith("Agent: "):
-        console.print(Panel(Text(message[7:]), title="[bold green]Yakuniy javob[/]", border_style="green"))
-    else:
-        console.print(Text(message))
+    """Compatibility renderer used by direct callers and CLI tests."""
+    TerminalUI(console).render_event(message)
 
 
-def _runtime() -> tuple[object, object, PathGuard, AuditLogger, ToolDispatcher]:
+def _runtime(terminal: TerminalUI | None = None) -> tuple[object, ToolRegistry, PathGuard, AuditLogger, ToolDispatcher]:
     settings = load_config()
     audit = AuditLogger(retention_days=settings.logging.retention)
     guard = PathGuard(settings.security.allowed_roots, protected_paths=settings.security.protected_paths)
@@ -80,13 +68,13 @@ def _runtime() -> tuple[object, object, PathGuard, AuditLogger, ToolDispatcher]:
     )
     dispatcher = ToolDispatcher(
         registry,
-        permission_checker=PermissionEngine(PermissionPolicy(approval_policy=settings.security.approval_policy), ApprovalManager(_RichApproval(), audit_logger=audit)),
+        permission_checker=PermissionEngine(PermissionPolicy(approval_policy=settings.security.approval_policy), ApprovalManager(_RichApproval(terminal), audit_logger=audit)),
         audit_logger=audit,
     )
     return settings, registry, guard, audit, dispatcher
 
 
-def _registry_runtime() -> tuple[object, object, PathGuard]:
+def _registry_runtime() -> tuple[object, ToolRegistry, PathGuard]:
     """Build the read-only tool listing without creating an audit log."""
     settings = load_config()
     guard = PathGuard(settings.security.allowed_roots, protected_paths=settings.security.protected_paths)
@@ -104,42 +92,184 @@ def _registry_runtime() -> tuple[object, object, PathGuard]:
 @app.command()
 def chat() -> None:
     """Interaktiv chatni ishga tushirish."""
+    terminal = TerminalUI(console)
     try:
-        settings, registry, guard, audit, dispatcher = _runtime()
+        settings, registry, guard, audit, dispatcher = _runtime(terminal)
     except (ConfigurationError, PathAccessError, OSError) as exc:
-        console.print(f"[red]XATO:[/] {exc}")
+        terminal.error(f"XATO: {exc}", "Konfiguratsiya va ruxsat berilgan yo'llarni tekshiring.")
         raise typer.Exit(1)
     try:
-        client = OllamaClient(model=settings.ollama.model, host=settings.ollama.host, timeout=settings.ollama.timeout, max_retries=settings.agent.max_retries)
-        controller = AgentController(client=client, registry=registry, dispatcher=dispatcher, path_guard=guard, system_prompt=SYSTEM_PROMPT, max_steps=settings.agent.max_steps, max_tool_calls=settings.agent.max_tool_calls, max_action_retries=settings.agent.max_action_retries, max_replans=settings.agent.max_replans, max_task_seconds=settings.agent.max_task_seconds, output=_agent_output)
-        console.print(Panel(
-            f"[bold]Holat:[/] tayyor\n[bold]Model:[/] {settings.ollama.model}\n[bold]Limitlar:[/] {settings.agent.max_steps} bosqich, {settings.agent.max_tool_calls} tool\n[bold]Chiqish:[/] exit yoki Ctrl+C",
-            title="[green]Terminal Agent v2.0[/]",
-            border_style="green",
-        ))
+        terminal.set_tool_registry(registry)
+        active_model = settings.ollama.model
+
+        def build_controller(model: str) -> AgentController:
+            client = OllamaClient(model=model, host=settings.ollama.host, timeout=settings.ollama.timeout, max_retries=settings.agent.max_retries)
+            return AgentController(client=client, registry=registry, dispatcher=dispatcher, path_guard=guard, system_prompt=SYSTEM_PROMPT, max_steps=settings.agent.max_steps, max_tool_calls=settings.agent.max_tool_calls, max_action_retries=settings.agent.max_action_retries, max_replans=settings.agent.max_replans, max_task_seconds=settings.agent.max_task_seconds, output=terminal.render_event)
+
+        controller = build_controller(active_model)
+
+        def change_model(model: str) -> None:
+            nonlocal active_model, controller
+            active_model = model
+            controller = build_controller(model)
+
+        terminal.banner(model=settings.ollama.model)
+        terminal.status_line()
         while True:
             try:
-                task = Prompt.ask("[bold cyan]Siz[/]").strip()
+                task = terminal.prompt(model=active_model).strip()
             except (EOFError, KeyboardInterrupt):
                 console.print("\nXayr!")
                 break
+
+            if task.startswith("/"):
+                if _handle_slash_command(
+                    task,
+                    terminal,
+                    registry,
+                    settings,
+                    on_model_change=change_model,
+                ):
+                    console.print("Xayr!")
+                    break
+                continue
+            if not task:
+                continue
+
             if task.casefold() in {"exit", "quit", "chiqish"}:
+                console.print("Xayr!")
                 break
-            if task:
-                console.print(Panel(Text(task), title="[blue]Joriy vazifa[/]", border_style="blue"))
-                with console.status("[bold cyan]Agent holati: ishlamoqda[/]"):
-                    result = controller.run_task(task)
-                color = "green" if result.status == "completed" else "yellow"
-                console.print(
-                    Panel(
-                        f"[bold]Holat:[/] {result.status}\n[bold]Bosqichlar:[/] {result.steps}\n[bold]Tool chaqiruvlari:[/] {result.tool_calls}\n[bold]Vazifa ID:[/] {result.task_id}",
-                        title=f"[bold {color}]Bajarilish yakuni[/]",
-                        border_style=color,
-                    )
-                )
+            terminal.begin_task()
+            terminal.add_message("user", task)
+            terminal.task(task)
+            started = time.monotonic()
+            with console.status("[bold cyan]O'ylayapman...[/]"):
+                result = controller.run_task(task)
+            elapsed = f"{time.monotonic() - started:.1f} s"
+            if result.response:
+                terminal.add_message("assistant", result.response)
+            terminal.completion(status=result.status, steps=result.steps, calls=result.tool_calls, task_id=result.task_id, elapsed=elapsed)
+            if result.status == "cancelled":
+                console.print("\nXayr!")
+                break
     finally:
         guard.close()
         audit.close()
+
+
+def _handle_slash_command(
+    task: str,
+    terminal: TerminalUI,
+    registry: object,
+    settings: object,
+    *,
+    on_model_change: Callable[[str], None] | None = None,
+) -> bool:
+    """Handle presentation-only chat commands; return true only to exit chat."""
+    if not task.startswith("/"):
+        return False
+    parts = task.split(maxsplit=1)
+    command = parts[0]
+    argument = parts[1] if len(parts) == 2 else ""
+    command = command.casefold()
+    argument = argument.strip()
+    if command == "/exit":
+        return True
+    if command == "/help":
+        terminal.help()
+    elif command == "/menu":
+        choice = terminal.menu()
+        if choice == "/exit":
+            return True
+        if choice:
+            return _handle_slash_command(
+                choice, terminal, registry, settings, on_model_change=on_model_change
+            )
+    elif command == "/tools":
+        if not argument:
+            terminal.tools()
+        else:
+            tool_parts = argument.split(maxsplit=1)
+            action = tool_parts[0]
+            action = action.casefold()
+            name = tool_parts[1].strip() if len(tool_parts) == 2 else ""
+            if action in {"on", "off"}:
+                if not name:
+                    terminal.error(
+                        f"/tools {action} buyrug'ida vosita nomi kerak.",
+                        "/tools on <nom> yoki /tools off <nom> ko'rinishida yozing.",
+                    )
+                else:
+                    terminal.set_tool_enabled(name, enabled=action == "on")
+            else:
+                terminal.tool_detail(argument)
+    elif command == "/model":
+        try:
+            response = ollama.Client(
+                host=settings.ollama.host, timeout=settings.ollama.timeout
+            ).list()
+            models = [
+                name
+                for item in getattr(response, "models", [])
+                if isinstance(
+                    name := getattr(item, "model", None) or getattr(item, "name", None),
+                    str,
+                )
+            ]
+        except Exception as exc:
+            terminal.error(
+                f"Ollama modellari olinmadi: {type(exc).__name__}.",
+                "`ollama serve` ni ishga tushirib, Ollama bilan ulanishni tekshiring.",
+            )
+            return False
+        if argument:
+            selected = next(
+                (name for name in models if name.casefold() == argument.casefold()),
+                None,
+            )
+            if selected is None:
+                terminal.error(
+                    f"Model topilmadi: {argument}",
+                    "Mavjud modellarni /model buyrug'i bilan tanlang.",
+                )
+                return False
+        else:
+            selected = terminal.choose_model(models)
+        if selected and on_model_change is not None:
+            on_model_change(selected)
+            terminal.model = selected
+            console.print(f"Model almashtirildi: {selected}")
+        elif not models:
+            terminal.error(
+                "Ollama'da model topilmadi.",
+                "`ollama pull gemma4:e2b-it-qat` buyrug'ini bajaring.",
+            )
+        elif selected is None:
+            terminal.show_models(models)
+    elif command == "/theme":
+        selected = argument.casefold() or terminal.choose_theme()
+        if selected and terminal.set_theme(selected):
+            console.print(f"Mavzu o'zgartirildi: {selected}")
+        else:
+            terminal.error("Mavzu topilmadi.", "dark, light, ocean yoki hacker mavzusidan foydalaning.")
+    elif command == "/clear":
+        console.clear()
+        terminal.banner(model=terminal.model)
+    elif command == "/history":
+        terminal.show_history()
+    elif command == "/save":
+        try:
+            saved = terminal.save_history(argument or None)
+        except (OSError, ValueError) as exc:
+            terminal.error(f"Suhbat saqlanmadi: {exc}", "Fayl nomini tekshiring.")
+        else:
+            console.print(f"Suhbat saqlandi: {saved}")
+    else:
+        terminal.error(
+            f"Noma'lum buyruq: {command}. /help ni ko'ring",
+            "Buyruq agentga yuborilmadi.",
+        )
+    return False
 
 
 @tools_app.command("list")
